@@ -1,0 +1,29 @@
+
+NATIVE_ENABLED = true
+OCAMLOPTFLAGS = -S -inline 100
+USE_OCAMLFIND = true
+
+OCAMLFLAGS += -syntax camlp4o
+OCAMLDEPFLAGS += -syntax camlp4o
+
+OCAMLPACKS[] =
+    lwt
+    lwt.syntax
+    extlib
+    unix
+    str
+    pgocaml
+    pgocaml.syntax
+
+OBJECTS[] =
+    extSet
+    mq_server
+
+OCamlProgram(mq_server, $(OBJECTS))
+
+.DEFAULT: mq_server$(EXE)
+
+.PHONY: clean
+
+clean:
+	rm -f $(filter-proper-targets $(ls R, .)) *.s

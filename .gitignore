@@ -1,0 +1,12 @@
+*.o
+*.opt
+*.run
+*.cmx*
+*.cmi
+*.cmo
+*.omc
+.omakedb*
+.*swp
+*.s
+
+/mq_server
