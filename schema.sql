@@ -5,6 +5,7 @@ CREATE TABLE mq_server_msgs(
     priority INT NOT NULL,
     destination VARCHAR(255) NOT NULL,
     "timestamp" TIMESTAMP WITHOUT TIME ZONE NOT NULL,
+    ack_timeout FLOAT NOT NULL,
     body TEXT NOT NULL
 );
 

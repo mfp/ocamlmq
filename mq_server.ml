@@ -2,7 +2,10 @@ open Printf
 open Lwt
 open ExtString
 
-module ACKS = Set.Make(String)
+module ACKS = Set.Make(struct
+                         type t = string * unit Lwt.t * unit Lwt.u
+                         let compare (s1, _, _) (s2, _, _) = String.compare s1 s2
+                       end)
 
 type subscription = {
   qs_name : string;
@@ -60,6 +63,7 @@ type message = {
   msg_priority : int;
   msg_timestamp : float;
   msg_body : string;
+  msg_ack_timeout : float;
 }
 
 type stomp_frame = {
@@ -149,7 +153,7 @@ let unblock_some_listeners listeners =
     listeners.l_ready <- SUBS.union listeners.l_ready unblocked;
     listeners.l_blocked <- SUBS.diff listeners.l_blocked unblocked
 
-let send_to_queue broker name msg =
+let rec send_to_queue broker name msg =
   try
     let ls = Hashtbl.find broker.b_queues name in
     let (conn, subs) as cursor = match ls.l_last_sent with
@@ -163,32 +167,47 @@ let send_to_queue broker name msg =
                  * give it another try *)
                 unblock_some_listeners ls;
                 SUBS.next cursor ls.l_ready
-            | c -> c
-    in subs.qs_pending_acks <- ACKS.add msg.msg_id subs.qs_pending_acks;
-       ls.l_last_sent <- Some cursor;
-       if is_subs_blocked subs then block_subscription ls cursor;
-       send_message broker msg conn
+            | c -> c in
+    let sleep, wakeup = Lwt.task () in
+      subs.qs_pending_acks <- ACKS.add (msg.msg_id, sleep, wakeup) subs.qs_pending_acks;
+      ls.l_last_sent <- Some cursor;
+      if is_subs_blocked subs then block_subscription ls cursor;
+      send_message broker msg conn >>
+      try_lwt
+        Lwt.select
+          [
+            Lwt_unix.timeout msg.msg_ack_timeout;
+            sleep
+          ]
+      with Lwt_unix.Timeout ->
+        (* didn't get ACK within msg_ack_timeout, enqueue msg again *)
+        send_to_queue broker name msg
   with Not_found -> save_message broker name msg
 
 let send_saved_messages broker listeners (conn, subs) =
   let num_msgs = Int64.of_int (subs_wanted_msgs subs) in
   let dest = subs.qs_name in
   lwt msgs = PGSQL(broker.b_dbh)
-      "SELECT msg_id, destination, timestamp, priority, body FROM mq_server_msgs
+      "SELECT msg_id, destination, timestamp, priority, ack_timeout, body FROM mq_server_msgs
         WHERE destination = $dest ORDER BY priority, timestamp LIMIT $num_msgs" in
   let new_pending =
-    List.fold_left (fun s (id, _, _, _, _) -> ACKS.add id s) subs.qs_pending_acks
+    List.fold_left
+      (fun s (id, _, _, _, _, _) ->
+         let sleep, wakeup = Lwt.task () in
+           ACKS.add (id, sleep, wakeup) s)
+      subs.qs_pending_acks
       msgs
   in
     subs.qs_pending_acks <- new_pending;
     if is_subs_blocked subs then block_subscription listeners (conn, subs);
     Lwt_util.iter_serial
-      (fun (msg_id, dst, timestamp, priority, body) ->
+      (fun (msg_id, dst, timestamp, priority, ack_timeout, body) ->
          send_message broker
            { msg_id = msg_id;
              msg_destination = Queue dst;
              msg_priority = Int32.to_int priority;
              msg_timestamp = CalendarLib.Calendar.to_unixfloat timestamp;
+             msg_ack_timeout = ack_timeout;
              msg_body = body;
            }
            conn)
@@ -309,6 +328,10 @@ let cmd_send broker conn frame =
         msg_priority = 0;
         msg_timestamp = Unix.gettimeofday ();
         msg_body = frame.fr_body;
+        msg_ack_timeout =
+          (try
+             float_of_string (List.assoc "ack-timeout" frame.fr_headers)
+           with _ -> 0.)
       }
   with Not_found ->
     send_error ~eol:broker.b_frame_eol conn
