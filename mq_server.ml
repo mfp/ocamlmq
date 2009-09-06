@@ -76,6 +76,8 @@ let string_of_destination = function
     Topic n -> "/topic/" ^ n
   | Queue n -> "/queue/" ^ n
 
+let destination_name = function Topic n | Queue n -> n
+
 let write_stomp_frame ~eol och frame =
   Lwt_io.atomic begin fun och ->
     Lwt_io.fprintf och "%s\n" frame.fr_command >>
@@ -129,9 +131,12 @@ let save_message broker queue msg =
   let t = CalendarLib.Calendar.from_unixfloat msg.msg_timestamp in
   let msg_id = msg.msg_id in
   let priority = Int32.of_int msg.msg_priority in
+  let ack_timeout = msg.msg_ack_timeout in
+    (* eprintf "Saving message %S.\n%!" msg_id; *)
     PGSQL(broker.b_dbh)
-      "INSERT INTO mq_server_msgs(msg_id, priority, destination, timestamp, body)
-              VALUES ($msg_id, $priority, $queue, $t, $body)"
+      "INSERT INTO mq_server_msgs(msg_id, priority, destination, timestamp,
+                                  ack_timeout, body)
+              VALUES ($msg_id, $priority, $queue, $t, $ack_timeout, $body)"
 
 let subs_wanted_msgs subs =
   if subs.qs_prefetch <= 0 then max_int
@@ -153,6 +158,20 @@ let unblock_some_listeners listeners =
     listeners.l_ready <- SUBS.union listeners.l_ready unblocked;
     listeners.l_blocked <- SUBS.diff listeners.l_blocked unblocked
 
+let enqueue_non_acked_msg broker msg =
+  let dbh = broker.b_dbh in
+  let id = msg.msg_id in
+  (* eprintf "enqueueing non-ACKed msg %S\n%!" id; *)
+  begin try_lwt
+    PGSQL(dbh)
+      "INSERT INTO mq_server_ack_msgs
+         (SELECT * FROM mq_server_msgs WHERE msg_id = $id)"
+  with PGOCaml.PostgreSQL_Error _ -> return ()
+    (* msg_id is not unique: happens if we had an ACK timeout and
+     * requeued the message *)
+  end >>
+  PGSQL(dbh) "DELETE FROM mq_server_msgs WHERE msg_id = $id"
+
 let rec send_to_queue broker name msg =
   try
     let ls = Hashtbl.find broker.b_queues name in
@@ -169,18 +188,26 @@ let rec send_to_queue broker name msg =
                 SUBS.next cursor ls.l_ready
             | c -> c in
     let sleep, wakeup = Lwt.task () in
+    let msg_id = msg.msg_id in
       subs.qs_pending_acks <- ACKS.add (msg.msg_id, sleep, wakeup) subs.qs_pending_acks;
       ls.l_last_sent <- Some cursor;
       if is_subs_blocked subs then block_subscription ls cursor;
       send_message broker msg conn >>
+      enqueue_non_acked_msg broker msg >>
       try_lwt
         Lwt.select
           [
             Lwt_unix.timeout msg.msg_ack_timeout;
-            sleep
-          ]
-      with Lwt_unix.Timeout ->
+            (sleep >> (print_endline "NORMAL"; return ()))
+          ] >>
+        PGSQL(broker.b_dbh)
+          "DELETE FROM mq_server_ack_msgs WHERE msg_id = $msg_id"
+      (* with Lwt_unix.Timeout | Lwt.Canceled -> *)
+      with _ ->
+        (* eprintf "TIMEOUT or CANCELED\n%!"; *)
         (* didn't get ACK within msg_ack_timeout, enqueue msg again *)
+        (* We don't delete from the mq_server_ack_msgs tbl since a crash
+         * before calling send_to_queue would mean the msg is LOST! *)
         send_to_queue broker name msg
   with Not_found -> save_message broker name msg
 
@@ -202,7 +229,7 @@ let send_saved_messages broker listeners (conn, subs) =
     if is_subs_blocked subs then block_subscription listeners (conn, subs);
     Lwt_util.iter_serial
       (fun (msg_id, dst, timestamp, priority, ack_timeout, body) ->
-         send_message broker
+         let msg =
            { msg_id = msg_id;
              msg_destination = Queue dst;
              msg_priority = Int32.to_int priority;
@@ -210,7 +237,8 @@ let send_saved_messages broker listeners (conn, subs) =
              msg_ack_timeout = ack_timeout;
              msg_body = body;
            }
-           conn)
+         in send_message broker msg conn >>
+            enqueue_non_acked_msg broker msg)
       msgs
 
 let send_message broker msg = match msg.msg_destination with
@@ -451,6 +479,15 @@ let establish_connection broker fd addr =
                 } >>
               handle_connection broker conn
             with End_of_file | Unix.Unix_error _ ->
+                let pending_acks =
+                  ACKS.elements
+                    (Hashtbl.fold
+                       (fun _ subs s -> ACKS.union subs.qs_pending_acks s)
+                       conn.conn_queues
+                       ACKS.empty) in
+                (* eprintf "CONNECTION %d DONE with %d pending ACKS\n%!" *)
+                  (* conn.conn_id *)
+                  (* (List.length pending_acks); *)
                 (* remove from connection set and subscription lists *)
                 broker.b_connections <- CONNS.remove conn broker.b_connections;
                 Hashtbl.iter
@@ -469,11 +506,38 @@ let establish_connection broker fd addr =
                          ls.l_blocked <- rm ls.l_blocked;
                      with Not_found -> ())
                   conn.conn_queues;
+                (* cancel all the waiters: they will re-queue the
+                 * corresponding messages *)
+                List.iter
+                  (fun (id, sleep, w) ->
+                     (* eprintf "have to re-queue %S\n%!" id; *)
+                     wakeup w ())
+                     (* wakeup_exn wakeup Lwt.Canceled) *)
+                  pending_acks;
                 return ()
+             | e ->
+                 (* eprintf "GOT EXCEPTION: %s" (Printexc.to_string e); *)
+                 Lwt_io.abort och
           end
       | _ -> Lwt_io.write och "ERROR\n\nExcepted CONNECT frame.\000\n" >>
              Lwt_io.flush och >>
              Lwt_io.abort ich
+
+let recover_unacked_messages dbh =
+  eprintf "Recovering from crash...\n%!";
+  PGOCaml.begin_work dbh >>
+  try_lwt
+    lwt n = PGSQL(dbh) "SELECT COUNT(*) FROM mq_server_ack_msgs" in
+    PGSQL(dbh) "INSERT INTO mq_server_msgs (SELECT * from mq_server_ack_msgs)" >>
+    PGSQL(dbh) "DELETE FROM mq_server_ack_msgs" >>
+    ((match n with
+         Some nmsgs :: _ -> eprintf "Recovered %Ld messages.\n%!" nmsgs;
+       | _ -> eprintf "No messages found.\n%!");
+    PGOCaml.commit dbh)
+  with _ ->
+    eprintf "Couldn't recover messages.\n%!";
+    PGOCaml.rollback dbh >>
+    fail (Failure "Couldn't recover non-ACKed messages from earlier crash.")
 
 let make_broker ?(frame_eol = true) dbh address =
   let sock = Lwt_unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
@@ -489,10 +553,13 @@ let make_broker ?(frame_eol = true) dbh address =
     b_dbh = dbh;
   }
 
-let rec serve_broker broker =
-  lwt (fd, addr) = Lwt_unix.accept broker.b_socket in
-    ignore_result (establish_connection broker fd addr);
-    serve_broker broker
+let serve_broker broker =
+  let rec loop () =
+    lwt (fd, addr) = Lwt_unix.accept broker.b_socket in
+      ignore_result (establish_connection broker fd addr);
+      loop ()
+  in
+    recover_unacked_messages broker.b_dbh >> loop ()
 
 let set_some_string r = Arg.String (fun s -> r := Some s)
 let set_some_int r = Arg.Int (fun n -> r := Some n)

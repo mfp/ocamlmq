@@ -9,5 +9,7 @@ CREATE TABLE mq_server_msgs(
     body TEXT NOT NULL
 );
 
+CREATE TABLE mq_server_ack_msgs(LIKE mq_server_msgs);
+
 CREATE INDEX mq_server_msgs_destination_priority_timestamp ON mq_server_msgs
        USING BTREE(priority, timestamp);
