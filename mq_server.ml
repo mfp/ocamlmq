@@ -588,6 +588,8 @@ let params =
 
 let usage_message = "Usage: mq_server [options]"
 
+let _ = Sys.set_signal Sys.sigpipe Sys.Signal_ignore
+
 let () =
   Arg.parse
     params
