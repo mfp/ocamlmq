@@ -23,10 +23,10 @@ type connection = {
   conn_topics : (string, subscription) Hashtbl.t;
 }
 
-module CONNS = ExtSet.Make(struct
-                              type t = connection
-                              let compare t1 t2 = t2.conn_id - t1.conn_id
-                            end)
+module CONNS = Set.Make(struct
+                          type t = connection
+                          let compare t1 t2 = t2.conn_id - t1.conn_id
+                        end)
 
 module SUBS = ExtSet.Make(struct
                             type t = (connection * subscription)
@@ -129,10 +129,16 @@ let save_message broker queue msg =
       "INSERT INTO mq_server_msgs(msg_id, priority, destination, timestamp, body)
               VALUES ($msg_id, $priority, $queue, $t, $body)"
 
-let is_subs_blocked (_, subs) = ACKS.cardinal subs.qs_pending_acks >= subs.qs_prefetch
+let subs_wanted_msgs subs =
+  if subs.qs_prefetch <= 0 then max_int
+  else subs.qs_prefetch - ACKS.cardinal subs.qs_pending_acks
 
-let select_blocked_subs s = SUBS.filter is_subs_blocked s
-let select_unblocked_subs s = SUBS.filter (fun x -> not (is_subs_blocked x)) s
+let is_subs_blocked subs =
+  subs.qs_prefetch >= 0 && ACKS.cardinal subs.qs_pending_acks >= subs.qs_prefetch
+
+let select_blocked_subs s = SUBS.filter (fun (_, x) -> is_subs_blocked x) s
+
+let select_unblocked_subs s = SUBS.filter (fun (_, x) -> not (is_subs_blocked x)) s
 
 let block_subscription listeners ((conn, subs) as c) =
   listeners.l_ready <- SUBS.remove c listeners.l_ready;
@@ -160,14 +166,12 @@ let send_to_queue broker name msg =
             | c -> c
     in subs.qs_pending_acks <- ACKS.add msg.msg_id subs.qs_pending_acks;
        ls.l_last_sent <- Some cursor;
-       if ACKS.cardinal subs.qs_pending_acks >= subs.qs_prefetch then
-         block_subscription ls cursor;
+       if is_subs_blocked subs then block_subscription ls cursor;
        send_message broker msg conn
   with Not_found -> save_message broker name msg
 
 let send_saved_messages broker listeners (conn, subs) =
-  let num_msgs =
-    Int64.of_int (subs.qs_prefetch - ACKS.cardinal subs.qs_pending_acks) in
+  let num_msgs = Int64.of_int (subs_wanted_msgs subs) in
   let dest = subs.qs_name in
   lwt msgs = PGSQL(broker.b_dbh)
       "SELECT msg_id, destination, timestamp, priority, body FROM mq_server_msgs
@@ -177,8 +181,7 @@ let send_saved_messages broker listeners (conn, subs) =
       msgs
   in
     subs.qs_pending_acks <- new_pending;
-    if ACKS.cardinal subs.qs_pending_acks >= subs.qs_prefetch then
-      block_subscription listeners (conn, subs);
+    if is_subs_blocked subs then block_subscription listeners (conn, subs);
     Lwt_util.iter_serial
       (fun (msg_id, dst, timestamp, priority, body) ->
          send_message broker
@@ -229,8 +232,10 @@ let cmd_subscribe broker conn frame =
     let subscription =
       {
         qs_name = (match destination with Topic n | Queue n -> n);
-        (* FIXME prefetch *)
-        qs_prefetch = 10;
+        qs_prefetch =
+          (try
+             int_of_string (List.assoc "prefetch" frame.fr_headers)
+           with _ -> -1);
         qs_pending_acks = ACKS.empty;
       }
     in match destination with
