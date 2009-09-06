@@ -20,8 +20,10 @@ type connection = {
 
 module CONN_S = ExtSet.Make(struct
                               type t = connection
-                              let compare t1 t2 = t2.conn_id - t1.conn_id 
+                              let compare t1 t2 = t2.conn_id - t1.conn_id
                             end)
+
+INCLUDE "mq_schema.ml"
 
 module PGOCaml = PGOCaml_generic.Make(struct include Lwt include Lwt_chan end)
 
@@ -31,12 +33,13 @@ type listeners = {
   mutable l_last_sent : connection option;
 }
 
-type broker = {
+type 'a broker = {
   mutable b_connections : CONN_S.t;
   b_queues : (string, listeners) Hashtbl.t;
   b_topics : (string, CONN_S.t ref) Hashtbl.t;
   b_socket : Lwt_unix.file_descr;
   b_frame_eol : bool;
+  b_dbh : 'a PGOCaml.t;
 }
 
 type destination = Queue of string | Topic of string
@@ -84,13 +87,13 @@ let handle_receipt ~eol och frame =
   with Not_found -> return ()
 
 let send_to_topic broker name msg =
-  try 
+  try
     let s = Hashtbl.find broker.b_topics name in
     let dst = "/topic/" ^ name in
       Lwt.ignore_result
         (Lwt_util.iter
            (fun conn ->
-              write_stomp_frame ~eol:broker.b_frame_eol conn.conn_och 
+              write_stomp_frame ~eol:broker.b_frame_eol conn.conn_och
                 {
                   fr_command = "MESSAGE";
                   fr_headers = [
@@ -104,7 +107,16 @@ let send_to_topic broker name msg =
       return ()
   with Not_found -> return ()
 
-let send_to_queue broker name msg = return ()
+let save_message broker queue msg =
+  let body = msg.msg_body in
+  let t = CalendarLib.Calendar.from_unixfloat msg.msg_timestamp in
+    PGSQL(broker.b_dbh)
+      "INSERT INTO mq_server_msgs(destination, timestamp, body) VALUES ($queue, $t, $body)"
+
+let send_to_queue broker name msg =
+  try
+    raise Not_found
+  with Not_found -> save_message broker name msg
 
 let send_message broker msg = match msg.msg_destination with
     Queue name -> send_to_queue broker name msg
@@ -125,7 +137,7 @@ let queue_re = Str.regexp "/queue/"
 
 let send_error ~eol conn fmt =
   ksprintf
-    (fun msg -> 
+    (fun msg ->
        write_stomp_frame ~eol conn.conn_och
          { fr_command = "ERROR"; fr_headers = []; fr_body = msg; })
     fmt
@@ -155,7 +167,7 @@ let cmd_subscribe broker conn frame =
             let s = Hashtbl.find broker.b_topics name in
               s := CONN_S.add conn !s;
               return ()
-          with Not_found -> 
+          with Not_found ->
             Hashtbl.add broker.b_topics name (ref (CONN_S.singleton conn));
             return ()
         end
@@ -252,7 +264,7 @@ let read_stomp_headers ch =
             loop ((String.lowercase k, String.strip v) :: acc)
   in loop []
 
-let rec read_stomp_command ch = 
+let rec read_stomp_command ch =
   Lwt_io.read_line ch >>= function
       "" -> read_stomp_command ch
     | l -> return l
@@ -294,7 +306,7 @@ let read_stomp_frame ?(eol = true) ich =
     in return { fr_command = cmd; fr_headers = headers; fr_body = body }
 
 
-let handle_frame broker conn frame = 
+let handle_frame broker conn frame =
   try
     Hashtbl.find command_handlers (String.uppercase frame.fr_command)
       broker conn frame
@@ -334,20 +346,20 @@ let establish_connection broker fd addr =
                   fr_body = "";
                 } >>
               handle_connection broker conn
-            with End_of_file | Unix.Unix_error _ -> 
+            with End_of_file | Unix.Unix_error _ ->
                 (* remove from connection set and subscription lists *)
                 broker.b_connections <- CONN_S.remove conn broker.b_connections;
                 Hashtbl.iter
                   (fun k _ ->
                      try
                        let s = Hashtbl.find broker.b_topics k in
-                         s := CONN_S.remove conn !s 
+                         s := CONN_S.remove conn !s
                      with Not_found -> ())
                   conn.conn_topics;
                 Hashtbl.iter
                   (fun k _ ->
                      let rm s = CONN_S.remove conn s in
-                     try 
+                     try
                        let ls = Hashtbl.find broker.b_queues k in
                          ls.l_ready <- rm ls.l_ready;
                          ls.l_blocked <- rm ls.l_blocked;
@@ -359,7 +371,7 @@ let establish_connection broker fd addr =
              Lwt_io.flush och >>
              Lwt_io.abort ich
 
-let make_broker ?(frame_eol = true) address =
+let make_broker ?(frame_eol = true) dbh address =
   let sock = Lwt_unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
   Lwt_unix.setsockopt sock Unix.SO_REUSEADDR true;
   Lwt_unix.bind sock address;
@@ -370,6 +382,7 @@ let make_broker ?(frame_eol = true) address =
     b_topics = Hashtbl.create 13;
     b_socket = sock;
     b_frame_eol = frame_eol;
+    b_dbh = dbh;
   }
 
 let rec serve_broker broker =
@@ -377,6 +390,48 @@ let rec serve_broker broker =
     ignore_result (establish_connection broker fd addr);
     serve_broker broker
 
-let () = 
-  let addr = Unix.ADDR_INET (Unix.inet_addr_any, 44444) in
-    Lwt_unix.run (serve_broker (make_broker addr))
+let set_some_string r = Arg.String (fun s -> r := Some s)
+let set_some_int r = Arg.Int (fun n -> r := Some n)
+
+let db_host = ref None
+let db_port = ref None
+let db_database = ref None
+let db_user = ref None
+let db_password = ref None
+let db_unix_sock_dir = ref None
+let port = ref 44444
+
+let params =
+  Arg.align
+    [
+      "-dbhost", set_some_string db_host, "HOST Database server host.";
+      "-dbport", set_some_int db_port, "HOST Database server port.";
+      "-dbdatabase", set_some_string db_database, "DATABASE Database name.";
+      "-dbsockdir", set_some_string db_password, "DIR Database UNIX domain socket dir.";
+      "-dbuser", set_some_string db_user, "USER Database user.";
+      "-dbpassword", set_some_string db_password, "PASSWORD Database password.";
+      "-port", Arg.Set_int port, "PORT Port to listen at.";
+    ]
+
+let usage_message = "Usage: mq_server [options]"
+
+let () =
+  Arg.parse
+    params
+    (fun s -> eprintf "Unknown argument: %S\n%!" s;
+              Arg.usage params usage_message;
+              exit 1)
+    usage_message;
+  let addr = Unix.ADDR_INET (Unix.inet_addr_any, !port) in
+    Lwt_unix.run begin
+      lwt dbh = PGOCaml.connect
+                  ?host:!db_host
+                  ?port:!db_port
+                  ?database:!db_database
+                  ?unix_domain_socket_dir:!db_unix_sock_dir
+                  ?user:!db_user
+                  ?password:!db_password
+                  ()
+      in serve_broker (make_broker dbh addr)
+    end
+

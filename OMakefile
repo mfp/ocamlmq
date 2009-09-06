@@ -14,10 +14,16 @@ OCAMLPACKS[] =
     str
     pgocaml
     pgocaml.syntax
+    camlp4.macro
 
 OBJECTS[] =
     extSet
     mq_server
+
+mq_schema.ml: schema.sql generate_prepared_statements.rb
+        ruby generate_prepared_statements.rb create_db $< > $@
+
+.SCANNER: scan-ocaml-mq_server.ml: mq_server.ml mq_schema.ml
 
 OCamlProgram(mq_server, $(OBJECTS))
 
