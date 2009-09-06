@@ -172,44 +172,48 @@ let enqueue_non_acked_msg broker msg =
   end >>
   PGSQL(dbh) "DELETE FROM mq_server_msgs WHERE msg_id = $id"
 
-let rec send_to_queue broker name msg =
+let find_recipient broker name =
   try
     let ls = Hashtbl.find broker.b_queues name in
-    let (conn, subs) as cursor = match ls.l_last_sent with
+      match ls.l_last_sent with
           None -> (* first msg sent, there can be no blocked client *)
-            SUBS.min_elt ls.l_ready
-      | Some cursor ->
-          if SUBS.is_empty ls.l_ready then unblock_some_listeners ls;
-          match SUBS.next cursor ls.l_ready with
-            | c when c = SUBS.min_elt ls.l_ready ->
-                (* went through all ready subscriptions, try to unblock some &
-                 * give it another try *)
-                unblock_some_listeners ls;
-                SUBS.next cursor ls.l_ready
-            | c -> c in
-    let sleep, wakeup = Lwt.task () in
-    let msg_id = msg.msg_id in
-      subs.qs_pending_acks <- ACKS.add (msg.msg_id, sleep, wakeup) subs.qs_pending_acks;
-      ls.l_last_sent <- Some cursor;
-      if is_subs_blocked subs then block_subscription ls cursor;
-      send_message broker msg conn >>
-      enqueue_non_acked_msg broker msg >>
+            Some (ls, SUBS.min_elt ls.l_ready)
+        | Some cursor ->
+            if SUBS.is_empty ls.l_ready then unblock_some_listeners ls;
+            match SUBS.next cursor ls.l_ready with
+              | c when c = SUBS.min_elt ls.l_ready ->
+                  (* went through all ready subscriptions, try to unblock some &
+                   * give it another try *)
+                  unblock_some_listeners ls;
+                  Some (ls, SUBS.next cursor ls.l_ready)
+              | c -> Some (ls, c)
+  with Not_found -> None
+
+let send_to_recipient broker listeners conn subs msg =
+  let sleep, wakeup = Lwt.task () in
+  let msg_id = msg.msg_id in
+    subs.qs_pending_acks <- ACKS.add (msg.msg_id, sleep, wakeup)
+                                     subs.qs_pending_acks;
+    listeners.l_last_sent <- Some (conn, subs);
+    if is_subs_blocked subs then block_subscription listeners (conn, subs);
+    send_message broker msg conn >>
+    enqueue_non_acked_msg broker msg >>
+    Lwt.select [ Lwt_unix.timeout msg.msg_ack_timeout; sleep; ] >>
+    PGSQL(broker.b_dbh)
+      "DELETE FROM mq_server_ack_msgs WHERE msg_id = $msg_id"
+
+let rec send_to_queue broker name msg = match find_recipient broker name with
+    None -> save_message broker name msg
+  | Some (listeners, (conn, subs)) ->
       try_lwt
-        Lwt.select
-          [
-            Lwt_unix.timeout msg.msg_ack_timeout;
-            (sleep >> (print_endline "NORMAL"; return ()))
-          ] >>
-        PGSQL(broker.b_dbh)
-          "DELETE FROM mq_server_ack_msgs WHERE msg_id = $msg_id"
-      (* with Lwt_unix.Timeout | Lwt.Canceled -> *)
+        send_to_recipient broker listeners conn subs msg
+        (* with Lwt_unix.Timeout | Lwt.Canceled -> *)
       with _ ->
         (* eprintf "TIMEOUT or CANCELED\n%!"; *)
         (* didn't get ACK within msg_ack_timeout, enqueue msg again *)
         (* We don't delete from the mq_server_ack_msgs tbl since a crash
          * before calling send_to_queue would mean the msg is LOST! *)
         send_to_queue broker name msg
-  with Not_found -> save_message broker name msg
 
 let send_saved_messages broker listeners (conn, subs) =
   let num_msgs = Int64.of_int (subs_wanted_msgs subs) in
