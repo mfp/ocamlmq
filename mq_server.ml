@@ -2,11 +2,16 @@ open Printf
 open Lwt
 open ExtString
 
+module ACKS = Set.Make(String)
+
 type subscription = {
   qs_name : string;
   qs_prefetch : int;
-  qs_pending_acks : int;
+  mutable qs_pending_acks : ACKS.t;
 }
+
+let dummy_subscription =
+  { qs_name = ""; qs_prefetch = 0; qs_pending_acks = ACKS.empty }
 
 type connection = {
   conn_id : int;
@@ -18,25 +23,30 @@ type connection = {
   conn_topics : (string, subscription) Hashtbl.t;
 }
 
-module CONN_S = ExtSet.Make(struct
+module CONNS = ExtSet.Make(struct
                               type t = connection
                               let compare t1 t2 = t2.conn_id - t1.conn_id
                             end)
+
+module SUBS = ExtSet.Make(struct
+                            type t = (connection * subscription)
+                            let compare (t1, _) (t2, _) = t2.conn_id - t1.conn_id
+                          end)
 
 INCLUDE "mq_schema.ml"
 
 module PGOCaml = PGOCaml_generic.Make(struct include Lwt include Lwt_chan end)
 
 type listeners = {
-  mutable l_ready : CONN_S.t;
-  mutable l_blocked : CONN_S.t;
-  mutable l_last_sent : connection option;
+  mutable l_ready : SUBS.t;
+  mutable l_blocked : SUBS.t;
+  mutable l_last_sent : SUBS.elt option;
 }
 
 type 'a broker = {
-  mutable b_connections : CONN_S.t;
+  mutable b_connections : CONNS.t;
   b_queues : (string, listeners) Hashtbl.t;
-  b_topics : (string, CONN_S.t ref) Hashtbl.t;
+  b_topics : (string, CONNS.t ref) Hashtbl.t;
   b_socket : Lwt_unix.file_descr;
   b_frame_eol : bool;
   b_dbh : 'a PGOCaml.t;
@@ -57,6 +67,10 @@ type stomp_frame = {
   fr_headers : (string * string) list;
   fr_body : string;
 }
+
+let string_of_destination = function
+    Topic n -> "/topic/" ^ n
+  | Queue n -> "/queue/" ^ n
 
 let write_stomp_frame ~eol och frame =
   Lwt_io.atomic begin fun och ->
@@ -86,37 +100,96 @@ let handle_receipt ~eol och frame =
           fr_body = "" }
   with Not_found -> return ()
 
+let send_message broker msg conn =
+  write_stomp_frame ~eol:broker.b_frame_eol conn.conn_och
+    {
+      fr_command = "MESSAGE";
+      fr_headers = [
+        "message-id", msg.msg_id;
+        "destination", string_of_destination msg.msg_destination;
+        "content-length", string_of_int (String.length msg.msg_body);
+      ];
+      fr_body = msg.msg_body
+    }
+
 let send_to_topic broker name msg =
   try
     let s = Hashtbl.find broker.b_topics name in
-    let dst = "/topic/" ^ name in
       Lwt.ignore_result
-        (Lwt_util.iter
-           (fun conn ->
-              write_stomp_frame ~eol:broker.b_frame_eol conn.conn_och
-                {
-                  fr_command = "MESSAGE";
-                  fr_headers = [
-                    "message-id", msg.msg_id;
-                    "destination", dst;
-                    "content-length", string_of_int (String.length msg.msg_body);
-                  ];
-                  fr_body = msg.msg_body
-                })
-           (CONN_S.elements !s));
+        (Lwt_util.iter (send_message broker msg) (CONNS.elements !s));
       return ()
   with Not_found -> return ()
 
 let save_message broker queue msg =
   let body = msg.msg_body in
   let t = CalendarLib.Calendar.from_unixfloat msg.msg_timestamp in
+  let msg_id = msg.msg_id in
+  let priority = Int32.of_int msg.msg_priority in
     PGSQL(broker.b_dbh)
-      "INSERT INTO mq_server_msgs(destination, timestamp, body) VALUES ($queue, $t, $body)"
+      "INSERT INTO mq_server_msgs(msg_id, priority, destination, timestamp, body)
+              VALUES ($msg_id, $priority, $queue, $t, $body)"
+
+let is_subs_blocked (_, subs) = ACKS.cardinal subs.qs_pending_acks >= subs.qs_prefetch
+
+let select_blocked_subs s = SUBS.filter is_subs_blocked s
+let select_unblocked_subs s = SUBS.filter (fun x -> not (is_subs_blocked x)) s
+
+let block_subscription listeners ((conn, subs) as c) =
+  listeners.l_ready <- SUBS.remove c listeners.l_ready;
+  listeners.l_blocked <- SUBS.add c listeners.l_blocked
+
+let unblock_some_listeners listeners =
+  let unblocked = select_unblocked_subs listeners.l_blocked in
+    listeners.l_ready <- SUBS.union listeners.l_ready unblocked;
+    listeners.l_blocked <- SUBS.diff listeners.l_blocked unblocked
 
 let send_to_queue broker name msg =
   try
-    raise Not_found
+    let ls = Hashtbl.find broker.b_queues name in
+    let (conn, subs) as cursor = match ls.l_last_sent with
+          None -> (* first msg sent, there can be no blocked client *)
+            SUBS.min_elt ls.l_ready
+      | Some cursor ->
+          if SUBS.is_empty ls.l_ready then unblock_some_listeners ls;
+          match SUBS.next cursor ls.l_ready with
+            | c when c = SUBS.min_elt ls.l_ready ->
+                (* went through all ready subscriptions, try to unblock some &
+                 * give it another try *)
+                unblock_some_listeners ls;
+                SUBS.next cursor ls.l_ready
+            | c -> c
+    in subs.qs_pending_acks <- ACKS.add msg.msg_id subs.qs_pending_acks;
+       ls.l_last_sent <- Some cursor;
+       if ACKS.cardinal subs.qs_pending_acks >= subs.qs_prefetch then
+         block_subscription ls cursor;
+       send_message broker msg conn
   with Not_found -> save_message broker name msg
+
+let send_saved_messages broker listeners (conn, subs) =
+  let num_msgs =
+    Int64.of_int (subs.qs_prefetch - ACKS.cardinal subs.qs_pending_acks) in
+  let dest = subs.qs_name in
+  lwt msgs = PGSQL(broker.b_dbh)
+      "SELECT msg_id, destination, timestamp, priority, body FROM mq_server_msgs
+        WHERE destination = $dest ORDER BY priority, timestamp LIMIT $num_msgs" in
+  let new_pending =
+    List.fold_left (fun s (id, _, _, _, _) -> ACKS.add id s) subs.qs_pending_acks
+      msgs
+  in
+    subs.qs_pending_acks <- new_pending;
+    if ACKS.cardinal subs.qs_pending_acks >= subs.qs_prefetch then
+      block_subscription listeners (conn, subs);
+    Lwt_util.iter_serial
+      (fun (msg_id, dst, timestamp, priority, body) ->
+         send_message broker
+           { msg_id = msg_id;
+             msg_destination = Queue dst;
+             msg_priority = Int32.to_int priority;
+             msg_timestamp = CalendarLib.Calendar.to_unixfloat timestamp;
+             msg_body = body;
+           }
+           conn)
+      msgs
 
 let send_message broker msg = match msg.msg_destination with
     Queue name -> send_to_queue broker name msg
@@ -156,33 +229,36 @@ let cmd_subscribe broker conn frame =
     let subscription =
       {
         qs_name = (match destination with Topic n | Queue n -> n);
-        (* FIXME *)
+        (* FIXME prefetch *)
         qs_prefetch = 10;
-        qs_pending_acks = 0;
+        qs_pending_acks = ACKS.empty;
       }
     in match destination with
         Topic name -> begin
           Hashtbl.replace conn.conn_topics name subscription;
           try
             let s = Hashtbl.find broker.b_topics name in
-              s := CONN_S.add conn !s;
+              s := CONNS.add conn !s;
               return ()
           with Not_found ->
-            Hashtbl.add broker.b_topics name (ref (CONN_S.singleton conn));
+            Hashtbl.add broker.b_topics name (ref (CONNS.singleton conn));
             return ()
         end
       | Queue name -> begin
           Hashtbl.replace conn.conn_queues name subscription;
-          try
-            let ls = Hashtbl.find broker.b_queues name in
-              ls.l_ready <- CONN_S.add conn ls.l_ready;
-              return ()
-          with Not_found ->
-            Hashtbl.add broker.b_queues name
-              { l_ready = CONN_S.singleton conn;
-                l_blocked = CONN_S.empty;
-                l_last_sent = None };
-            return ()
+          let listeners =
+            try
+              let ls = Hashtbl.find broker.b_queues name in
+                ls.l_ready <- SUBS.add (conn, subscription) ls.l_ready;
+                ls
+            with Not_found ->
+              let ls = { l_ready = SUBS.singleton (conn, subscription);
+                         l_blocked = SUBS.empty;
+                         l_last_sent = None }
+              in Hashtbl.add broker.b_queues name ls;
+                 ls
+          in
+            send_saved_messages broker listeners (conn, subscription)
         end
   with Not_found ->
     send_error ~eol:broker.b_frame_eol conn
@@ -194,8 +270,8 @@ let cmd_unsubscribe broker conn frame =
         Topic name -> begin
           try
             let s = Hashtbl.find broker.b_topics name in
-              s := CONN_S.remove conn !s;
-              if CONN_S.is_empty !s then
+              s := CONNS.remove conn !s;
+              if CONNS.is_empty !s then
                 Hashtbl.remove broker.b_topics name;
               return ()
           with Not_found -> return ()
@@ -203,9 +279,9 @@ let cmd_unsubscribe broker conn frame =
       | Queue name -> begin
           try
             let ls = Hashtbl.find broker.b_queues name in
-              ls.l_ready <- CONN_S.remove conn ls.l_ready;
-              ls.l_blocked <- CONN_S.remove conn ls.l_blocked;
-              if CONN_S.is_empty ls.l_ready && CONN_S.is_empty ls.l_blocked then
+              ls.l_ready <- SUBS.remove (conn, dummy_subscription) ls.l_ready;
+              ls.l_blocked <- SUBS.remove (conn, dummy_subscription) ls.l_blocked;
+              if SUBS.is_empty ls.l_ready && SUBS.is_empty ls.l_blocked then
                 Hashtbl.remove broker.b_queues name;
               return ()
           with Not_found -> return ()
@@ -348,17 +424,17 @@ let establish_connection broker fd addr =
               handle_connection broker conn
             with End_of_file | Unix.Unix_error _ ->
                 (* remove from connection set and subscription lists *)
-                broker.b_connections <- CONN_S.remove conn broker.b_connections;
+                broker.b_connections <- CONNS.remove conn broker.b_connections;
                 Hashtbl.iter
                   (fun k _ ->
                      try
                        let s = Hashtbl.find broker.b_topics k in
-                         s := CONN_S.remove conn !s
+                         s := CONNS.remove conn !s
                      with Not_found -> ())
                   conn.conn_topics;
                 Hashtbl.iter
                   (fun k _ ->
-                     let rm s = CONN_S.remove conn s in
+                     let rm s = SUBS.remove (conn, dummy_subscription) s in
                      try
                        let ls = Hashtbl.find broker.b_queues k in
                          ls.l_ready <- rm ls.l_ready;
@@ -377,7 +453,7 @@ let make_broker ?(frame_eol = true) dbh address =
   Lwt_unix.bind sock address;
   Lwt_unix.listen sock 1024;
   {
-    b_connections = CONN_S.empty;
+    b_connections = CONNS.empty;
     b_queues = Hashtbl.create 13;
     b_topics = Hashtbl.create 13;
     b_socket = sock;
