@@ -79,23 +79,21 @@ let string_of_destination = function
 let destination_name = function Topic n | Queue n -> n
 
 let write_stomp_frame ~eol och frame =
-  Lwt_io.atomic begin fun och ->
-    Lwt_io.fprintf och "%s\n" frame.fr_command >>
-    Lwt_util.iter
-      (fun (k, v) -> Lwt_io.fprintf och "%s: %s\n" k v) frame.fr_headers >>
-    begin
-      if not (List.mem_assoc "content-length" frame.fr_headers) then
-        Lwt_io.fprintf och "content-length: %d\n" (String.length frame.fr_body)
-      else
-        return ()
-    end >>
-    Lwt_io.fprintf och "\n" >>
-    Lwt_io.write och frame.fr_body >>
+  let b = Buffer.create
+            (80 * List.length frame.fr_headers + String.length frame.fr_body)
+  in
+    bprintf b "%s\n" frame.fr_command;
+    List.iter
+      (fun (k, v) -> if k <> "content-length" then bprintf b "%s: %s\n" k v)
+      frame.fr_headers;
+    bprintf b "content-length: %d\n" (String.length frame.fr_body);
+    bprintf b "\n";
+    Buffer.add_string b frame.fr_body;
     if eol then
-      Lwt_io.write och "\000\n" >> Lwt_io.flush och
+      Buffer.add_string b "\000\n"
     else
-      Lwt_io.write och "\000" >> Lwt_io.flush och
-  end och
+      Buffer.add_string b "\000";
+    Lwt_io.write och (Buffer.contents b) >> Lwt_io.flush och
 
 let handle_receipt ~eol och frame =
   try
