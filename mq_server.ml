@@ -136,6 +136,22 @@ let save_message broker queue msg =
                                   ack_timeout, body)
               VALUES ($msg_id, $priority, $queue, $t, $ack_timeout, $body)"
 
+let recover_non_acked_msg broker msg_id =
+  PGSQL(broker.b_dbh)
+    "SELECT priority, destination, timestamp, ack_timeout, body
+       FROM mq_server_ack_msgs
+      WHERE msg_id = $msg_id"
+  >>= function
+    | (priority, destination, timestamp, ack_timeout, body) :: _ ->
+        return
+          (Some { msg_id = msg_id;
+                  msg_priority = Int32.to_int priority;
+                  msg_destination = Queue destination;
+                  msg_timestamp = CalendarLib.Calendar.to_unixfloat timestamp;
+                  msg_ack_timeout = ack_timeout;
+                  msg_body = body })
+    | [] -> return None
+
 let subs_wanted_msgs subs =
   if subs.qs_prefetch <= 0 then max_int
   else subs.qs_prefetch - ACKS.cardinal subs.qs_pending_acks
@@ -194,54 +210,74 @@ let send_to_recipient broker listeners conn subs msg =
                                      subs.qs_pending_acks;
     listeners.l_last_sent <- Some (conn, subs);
     if is_subs_blocked subs then block_subscription listeners (conn, subs);
-    send_message broker msg conn >>
     enqueue_non_acked_msg broker msg >>
-    Lwt.select [ Lwt_unix.timeout msg.msg_ack_timeout; sleep; ] >>
+    send_message broker msg conn >>
+    let threads = match msg.msg_ack_timeout with
+        dt when dt > 0. -> [ Lwt_unix.timeout dt; sleep ]
+      | _ -> [ sleep ] in
+    Lwt.select threads >>
     PGSQL(broker.b_dbh)
       "DELETE FROM mq_server_ack_msgs WHERE msg_id = $msg_id"
 
 let rec send_to_queue broker name msg = match find_recipient broker name with
     None -> save_message broker name msg
   | Some (listeners, (conn, subs)) ->
-      try_lwt
-        send_to_recipient broker listeners conn subs msg
-        (* with Lwt_unix.Timeout | Lwt.Canceled -> *)
-      with _ ->
-        (* eprintf "TIMEOUT or CANCELED\n%!"; *)
-        (* didn't get ACK within msg_ack_timeout, enqueue msg again *)
-        (* We don't delete from the mq_server_ack_msgs tbl since a crash
-         * before calling send_to_queue would mean the msg is LOST! *)
-        send_to_queue broker name msg
+      let msg_id = msg.msg_id in
+      let rec do_send listeners conn subs =
+        try_lwt
+          send_to_recipient broker listeners conn subs msg
+          (* with Lwt_unix.Timeout | Lwt.Canceled -> *)
+        with _ ->
+          eprintf "TIMEOUT or CANCELED\n%!";
+          (* didn't get ACK within msg_ack_timeout, enqueue msg again *)
+          (* We don't delete from the mq_server_ack_msgs tbl since a crash
+           * before calling send_to_queue would mean the msg is LOST! *)
+          recover_non_acked_msg broker msg_id >>= function
+              None -> return ()
+            | Some msg -> begin
+                match find_recipient broker name with
+                  | None -> begin (* move to main table *)
+                      (* eprintf "No recipient for non-ACK message, saving.\n%!"; *)
+                      PGOCaml.begin_work broker.b_dbh >>
+                      try_lwt
+                        save_message broker name msg >>
+                        PGSQL(broker.b_dbh)
+                          "DELETE FROM mq_server_ack_msgs WHERE msg_id = $msg_id" >>
+                        PGOCaml.commit broker.b_dbh
+                      with _ ->
+                        PGOCaml.rollback broker.b_dbh
+                        (* FIXME: better strategy? *)
+                        (* leave as non-ACKed, will eventually get it after shutdown/crash *)
+                    end
+                  | Some (listeners, (conn, subs)) -> do_send listeners conn subs
+              end
+      in
+         do_send listeners conn subs
 
-let send_saved_messages broker listeners (conn, subs) =
-  let num_msgs = Int64.of_int (subs_wanted_msgs subs) in
+let rec send_saved_messages broker listeners (conn, subs) =
   let dest = subs.qs_name in
-  lwt msgs = PGSQL(broker.b_dbh)
-      "SELECT msg_id, destination, timestamp, priority, ack_timeout, body FROM mq_server_msgs
-        WHERE destination = $dest ORDER BY priority, timestamp LIMIT $num_msgs" in
-  let new_pending =
-    List.fold_left
-      (fun s (id, _, _, _, _, _) ->
-         let sleep, wakeup = Lwt.task () in
-           ACKS.add (id, sleep, wakeup) s)
-      subs.qs_pending_acks
-      msgs
-  in
-    subs.qs_pending_acks <- new_pending;
-    if is_subs_blocked subs then block_subscription listeners (conn, subs);
-    Lwt_util.iter_serial
-      (fun (msg_id, dst, timestamp, priority, ack_timeout, body) ->
-         let msg =
-           { msg_id = msg_id;
-             msg_destination = Queue dst;
-             msg_priority = Int32.to_int priority;
-             msg_timestamp = CalendarLib.Calendar.to_unixfloat timestamp;
-             msg_ack_timeout = ack_timeout;
-             msg_body = body;
-           }
-         in send_message broker msg conn >>
-            enqueue_non_acked_msg broker msg)
-      msgs
+  PGSQL(broker.b_dbh)
+      "SELECT msg_id, destination, timestamp, priority, ack_timeout, body
+         FROM mq_server_msgs
+        WHERE destination = $dest
+     ORDER BY priority, timestamp
+        LIMIT 1"
+  >>= function
+      [] -> return ()
+    | (msg_id, dst, timestamp, priority, ack_timeout, body) :: _ ->
+       let msg =
+         { msg_id = msg_id;
+           msg_destination = Queue dst;
+           msg_priority = Int32.to_int priority;
+           msg_timestamp = CalendarLib.Calendar.to_unixfloat timestamp;
+           msg_ack_timeout = ack_timeout;
+           msg_body = body;
+         }
+       in send_to_recipient broker listeners conn subs msg >>
+          if not (is_subs_blocked subs) then
+            send_saved_messages broker listeners (conn, subs)
+          else
+            return ()
 
 let send_message broker msg = match msg.msg_destination with
     Queue name -> send_to_queue broker name msg
