@@ -20,28 +20,24 @@ struct
 
 open Mq_types
 module STOMP = Mq_stomp
-module ACKS = Set.Make(struct
-                         type t = string * unit Lwt.t * unit Lwt.u
-                         let compare (s1, _, _) (s2, _, _) = String.compare s1 s2
-                       end)
+module SSET = Set.Make(String)
 
 type message_kind = Saved | Ack_pending
 
 type subscription = {
   qs_name : string;
   qs_prefetch : int;
-  mutable qs_pending_acks : ACKS.t;
+  mutable qs_pending_acks : int;
 }
 
-let dummy_subscription =
-  { qs_name = ""; qs_prefetch = 0; qs_pending_acks = ACKS.empty }
+let dummy_subscription = { qs_name = ""; qs_prefetch = 0; qs_pending_acks = 0 }
 
 type connection = {
   conn_id : int;
   conn_ich : Lwt_io.input_channel;
   conn_och : Lwt_io.output_channel;
   conn_default_prefetch : int;
-  mutable conn_pending_acks : int;
+  mutable conn_pending_acks : (string, unit Lwt.u) Hashtbl.t;
   conn_queues : (string, subscription) Hashtbl.t;
   conn_topics : (string, subscription) Hashtbl.t;
 }
@@ -70,7 +66,6 @@ type broker = {
   b_frame_eol : bool;
   b_msg_store : P.t;
   b_async_send : bool;
-  b_pending_acks : (string, unit Lwt.u) Hashtbl.t;
 }
 
 let send_error broker conn fmt =
@@ -88,10 +83,10 @@ let send_to_topic broker msg =
 
 let subs_wanted_msgs subs =
   if subs.qs_prefetch <= 0 then max_int
-  else subs.qs_prefetch - ACKS.cardinal subs.qs_pending_acks
+  else subs.qs_prefetch - subs.qs_pending_acks
 
 let is_subs_blocked subs =
-  subs.qs_prefetch >= 0 && ACKS.cardinal subs.qs_pending_acks >= subs.qs_prefetch
+  subs.qs_prefetch >= 0 && subs.qs_pending_acks >= subs.qs_prefetch
 
 let select_blocked_subs s = SUBS.filter (fun (_, x) -> is_subs_blocked x) s
 
@@ -127,11 +122,10 @@ let rec send_to_recipient ~kind broker listeners conn subs msg =
   print_endline "send_to_recipient";
   let sleep, wakeup = Lwt.task () in
   let msg_id = msg.msg_id in
-    subs.qs_pending_acks <- ACKS.add (msg.msg_id, sleep, wakeup)
-                                     subs.qs_pending_acks;
+    subs.qs_pending_acks <- subs.qs_pending_acks + 1;
+    Hashtbl.replace conn.conn_pending_acks msg_id wakeup;
     listeners.l_last_sent <- Some (conn, subs);
     if is_subs_blocked subs then block_subscription listeners (conn, subs);
-    Hashtbl.replace broker.b_pending_acks msg_id wakeup;
     (match kind with
          Ack_pending -> (* the message was already in ACK-pending set *) return ()
        | Saved -> (* just move to ACK *)
@@ -140,12 +134,16 @@ let rec send_to_recipient ~kind broker listeners conn subs msg =
     let threads = match msg.msg_ack_timeout with
         dt when dt > 0. -> [ Lwt_unix.timeout dt; sleep ]
       | _ -> [ sleep ] in
-    Lwt.select threads >>
+    begin try_lwt
+      Lwt.select threads
+    finally
+      (* either ACKed or Timeout/Cancel, at any rate, no longer want the ACK *)
+      Hashtbl.remove conn.conn_pending_acks msg_id;
+      subs.qs_pending_acks <- subs.qs_pending_acks - 1;
+      return ()
+    end >>
     begin
       eprintf "ACKed %S\n%!" msg_id;
-      subs.qs_pending_acks <- ACKS.remove (msg.msg_id, sleep, wakeup)
-                                          subs.qs_pending_acks;
-      Hashtbl.remove broker.b_pending_acks msg_id;
       P.ack_msg broker.b_msg_store msg_id >>
       send_saved_messages broker listeners conn subs
     end
@@ -215,7 +213,7 @@ let cmd_subscribe broker conn frame =
           (try
              int_of_string (STOMP.get_header frame "prefetch")
            with _ -> -1);
-        qs_pending_acks = ACKS.empty;
+        qs_pending_acks = 0;
       }
     in match destination with
         Topic name -> begin
@@ -313,11 +311,9 @@ let cmd_send broker conn frame =
 
 let cmd_ack broker conn frame =
   try_lwt
-  let msg_id = STOMP.get_header frame "message-id" in
-    (* TODO: first check that this msg has been sent to the current conn: we
-     * don't want them to be able to ACK messages sent to OTHER connections *)
-    wakeup (Hashtbl.find broker.b_pending_acks msg_id) ();
-    return ()
+    let msg_id = STOMP.get_header frame "message-id" in
+      wakeup (Hashtbl.find conn.conn_pending_acks msg_id) ();
+      return ()
   with Not_found -> return ()
 
 let ignore_command broker conn frame = return ()
@@ -358,15 +354,12 @@ let handle_connection broker conn =
   in loop ()
 
 let terminate_connection broker conn =
-  let pending_acks =
-    ACKS.elements
-      (Hashtbl.fold
-         (fun _ subs s -> ACKS.union subs.qs_pending_acks s)
-         conn.conn_queues
-         ACKS.empty) in
-  eprintf "CONNECTION %d DONE with %d pending ACKS\n%!"
-    conn.conn_id
-    (List.length pending_acks);
+  let wakeners =
+    Hashtbl.fold (fun _ u l -> u :: l) conn.conn_pending_acks [] in
+
+  eprintf "CONNECTION %d TERMINATED with %d pending ACKS\n%!"
+    conn.conn_id (List.length wakeners);
+
   (* remove from connection set and subscription lists *)
   broker.b_connections <- CONNS.remove conn broker.b_connections;
   Hashtbl.iter
@@ -385,12 +378,9 @@ let terminate_connection broker conn =
            ls.l_blocked <- rm ls.l_blocked;
        with Not_found -> ())
     conn.conn_queues;
-  (* remove from set of pending connections *)
-  List.iter
-    (fun (id, _, _) -> Hashtbl.remove broker.b_pending_acks id) pending_acks;
   (* cancel all the waiters: they will re-queue the
    * corresponding messages *)
-  List.iter (fun (id, t, u) -> cancel t) pending_acks;
+  List.iter (fun w -> wakeup_exn w Lwt.Canceled) wakeners;
   return ()
 
 let establish_connection broker fd addr =
@@ -406,7 +396,7 @@ let establish_connection broker fd addr =
               conn_ich = ich;
               conn_och = och;
               conn_default_prefetch = -1;
-              conn_pending_acks = 0;
+              conn_pending_acks = Hashtbl.create 13;
               conn_queues = Hashtbl.create 13;
               conn_topics = Hashtbl.create 13;
             }
@@ -445,7 +435,6 @@ let make_broker ?(frame_eol = true) ?(send_async = false) msg_store address =
     b_frame_eol = frame_eol;
     b_msg_store = msg_store;
     b_async_send = send_async;
-    b_pending_acks = Hashtbl.create 13;
   }
 
 let server_loop broker =
