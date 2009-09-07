@@ -70,6 +70,7 @@ type broker = {
   b_frame_eol : bool;
   b_msg_store : P.t;
   b_async_send : bool;
+  b_pending_acks : (string, unit Lwt.u) Hashtbl.t;
 }
 
 let send_error broker conn fmt =
@@ -130,6 +131,7 @@ let rec send_to_recipient ~kind broker listeners conn subs msg =
                                      subs.qs_pending_acks;
     listeners.l_last_sent <- Some (conn, subs);
     if is_subs_blocked subs then block_subscription listeners (conn, subs);
+    Hashtbl.replace broker.b_pending_acks msg_id wakeup;
     (match kind with
          Ack_pending -> (* the message was already in ACK-pending set *) return ()
        | Saved -> (* just move to ACK *)
@@ -140,8 +142,10 @@ let rec send_to_recipient ~kind broker listeners conn subs msg =
       | _ -> [ sleep ] in
     Lwt.select threads >>
     begin
+      eprintf "ACKed %S\n%!" msg_id;
       subs.qs_pending_acks <- ACKS.remove (msg.msg_id, sleep, wakeup)
                                           subs.qs_pending_acks;
+      Hashtbl.remove broker.b_pending_acks msg_id;
       P.ack_msg broker.b_msg_store msg_id >>
       send_saved_messages broker listeners conn subs
     end
@@ -307,6 +311,15 @@ let cmd_send broker conn frame =
     STOMP.send_error ~eol:broker.b_frame_eol conn.conn_och
       "Invalid or missing destination: must be of the form /queue/xxx or /topic/xxx."
 
+let cmd_ack broker conn frame =
+  try_lwt
+  let msg_id = STOMP.get_header frame "message-id" in
+    (* TODO: first check that this msg has been sent to the current conn: we
+     * don't want them to be able to ACK messages sent to OTHER connections *)
+    wakeup (Hashtbl.find broker.b_pending_acks msg_id) ();
+    return ()
+  with Not_found -> return ()
+
 let ignore_command broker conn frame = return ()
 
 let command_handlers = Hashtbl.create 13
@@ -324,6 +337,7 @@ let () =
       "UNSUBSCRIBE", with_receipt cmd_unsubscribe;
       "SEND", with_receipt cmd_send;
       "DISCONNECT", cmd_disconnect;
+      "ACK", with_receipt cmd_ack;
       "BEGIN", with_receipt ignore_command;
       "COMMIT", with_receipt ignore_command;
       "ABORT", with_receipt ignore_command;
@@ -371,6 +385,9 @@ let terminate_connection broker conn =
            ls.l_blocked <- rm ls.l_blocked;
        with Not_found -> ())
     conn.conn_queues;
+  (* remove from set of pending connections *)
+  List.iter
+    (fun (id, _, _) -> Hashtbl.remove broker.b_pending_acks id) pending_acks;
   (* cancel all the waiters: they will re-queue the
    * corresponding messages *)
   List.iter (fun (id, t, u) -> cancel t) pending_acks;
@@ -428,6 +445,7 @@ let make_broker ?(frame_eol = true) ?(send_async = false) msg_store address =
     b_frame_eol = frame_eol;
     b_msg_store = msg_store;
     b_async_send = send_async;
+    b_pending_acks = Hashtbl.create 13;
   }
 
 let server_loop broker =
