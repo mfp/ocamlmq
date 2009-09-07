@@ -25,7 +25,7 @@ module ACKS = Set.Make(struct
                          let compare (s1, _, _) (s2, _, _) = String.compare s1 s2
                        end)
 
-type message_kind = New | Old | Requeued
+type message_kind = Saved | Ack_pending
 
 type subscription = {
   qs_name : string;
@@ -69,12 +69,13 @@ type broker = {
   b_socket : Lwt_unix.file_descr;
   b_frame_eol : bool;
   b_msg_store : P.t;
+  b_async_send : bool;
 }
 
 let send_error broker conn fmt =
   STOMP.send_error ~eol:broker.b_frame_eol conn.conn_och fmt
 
-let send_new_to_topic broker msg =
+let send_to_topic broker msg =
   try
     let s = Hashtbl.find broker.b_topics (destination_name msg.msg_destination) in
       Lwt.ignore_result
@@ -130,9 +131,8 @@ let send_to_recipient ~kind broker listeners conn subs msg =
     listeners.l_last_sent <- Some (conn, subs);
     if is_subs_blocked subs then block_subscription listeners (conn, subs);
     (match kind with
-         Requeued -> (* the message was already in ACK-pending set *) return ()
-       | New -> P.register_ack_pending_new_msg broker.b_msg_store msg
-       | Old -> (* just move to ACK *)
+         Ack_pending -> (* the message was already in ACK-pending set *) return ()
+       | Saved -> (* just move to ACK *)
            P.register_ack_pending_msg broker.b_msg_store msg_id) >>
     STOMP.send_message ~eol:broker.b_frame_eol conn.conn_och msg >>
     let threads = match msg.msg_ack_timeout with
@@ -154,18 +154,18 @@ let rec enqueue_after_timeout broker msg_id =
           | Some (listeners, (conn, subs)) ->
               eprintf "Found a recipient for this message, sending\n%!";
               try_lwt
-                send_to_recipient ~kind:Requeued broker listeners conn subs msg
+                send_to_recipient ~kind:Ack_pending broker listeners conn subs msg
               with Lwt_unix.Timeout | Lwt.Canceled ->
                 eprintf "enqueue_after_timeout: TIMEOUT or CANCELED!\n%!";
                 enqueue_after_timeout broker msg_id
 
-let rec send_new_to_queue broker msg =
+let rec send_to_queue broker msg =
   match find_recipient broker (destination_name msg.msg_destination) with
-      None -> P.save_msg broker.b_msg_store msg
+      None -> return ()
     | Some (listeners, (conn, subs)) ->
         let msg_id = msg.msg_id in
           try_lwt
-            send_to_recipient ~kind:New broker listeners conn subs msg
+            send_to_recipient ~kind:Saved broker listeners conn subs msg
           with Lwt_unix.Timeout | Lwt.Canceled ->
             eprintf "send_new_to_queue: TIMEOUT or CANCELED\n%!";
             enqueue_after_timeout broker msg_id
@@ -176,7 +176,7 @@ let rec send_saved_messages broker listeners (conn, subs) =
     let msg_id = msg.msg_id in
     if not (is_subs_blocked subs) then
       try_lwt
-        send_to_recipient ~kind:Old broker listeners conn subs msg
+        send_to_recipient ~kind:Saved broker listeners conn subs msg
       with Lwt_unix.Timeout | Lwt.Canceled ->
         eprintf "send_saved_messages: TIMEOUT or CANCELED\n%!";
         enqueue_after_timeout broker msg_id
@@ -287,8 +287,17 @@ let cmd_send broker conn frame =
            with _ -> 0.)
       }
     in match destination with
-        Topic topic -> send_new_to_topic broker msg
-      | Queue queue -> send_new_to_queue broker msg
+        Topic topic -> send_to_topic broker msg
+      | Queue queue ->
+          let save = P.save_msg broker.b_msg_store msg in
+            if broker.b_async_send then begin
+              Lwt.ignore_result (save >> send_to_queue broker msg);
+              return ()
+            end else begin
+              lwt () = save in
+                Lwt.ignore_result (send_to_queue broker msg);
+                return ()
+            end
   with Not_found ->
     STOMP.send_error ~eol:broker.b_frame_eol conn.conn_och
       "Invalid or missing destination: must be of the form /queue/xxx or /topic/xxx."
@@ -403,7 +412,7 @@ let establish_connection broker fd addr =
              Lwt_io.flush och >>
              Lwt_io.abort ich
 
-let make_broker ?(frame_eol = true) msg_store address =
+let make_broker ?(frame_eol = true) ?(send_async = false) msg_store address =
   let sock = Lwt_unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
   Lwt_unix.setsockopt sock Unix.SO_REUSEADDR true;
   Lwt_unix.bind sock address;
@@ -415,6 +424,7 @@ let make_broker ?(frame_eol = true) msg_store address =
     b_socket = sock;
     b_frame_eol = frame_eol;
     b_msg_store = msg_store;
+    b_async_send = send_async;
   }
 
 let server_loop broker =
