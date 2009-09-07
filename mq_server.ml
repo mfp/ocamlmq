@@ -338,6 +338,44 @@ let handle_connection broker conn =
     loop ()
   in loop ()
 
+let terminate_connection broker conn =
+  let pending_acks =
+    ACKS.elements
+      (Hashtbl.fold
+         (fun _ subs s -> ACKS.union subs.qs_pending_acks s)
+         conn.conn_queues
+         ACKS.empty) in
+  eprintf "CONNECTION %d DONE with %d pending ACKS\n%!"
+    conn.conn_id
+    (List.length pending_acks);
+  (* remove from connection set and subscription lists *)
+  broker.b_connections <- CONNS.remove conn broker.b_connections;
+  Hashtbl.iter
+    (fun k _ ->
+       try
+         let s = Hashtbl.find broker.b_topics k in
+           s := CONNS.remove conn !s
+       with Not_found -> ())
+    conn.conn_topics;
+  Hashtbl.iter
+    (fun k _ ->
+       let rm s = SUBS.remove (conn, dummy_subscription) s in
+       try
+         let ls = Hashtbl.find broker.b_queues k in
+           ls.l_ready <- rm ls.l_ready;
+           ls.l_blocked <- rm ls.l_blocked;
+       with Not_found -> ())
+    conn.conn_queues;
+  (* cancel all the waiters: they will re-queue the
+   * corresponding messages *)
+  List.iter
+    (fun (id, sleep, w) ->
+       (* eprintf "have to re-queue %S\n%!" id; *)
+       wakeup w ())
+       (* wakeup_exn wakeup Lwt.Canceled) *)
+    pending_acks;
+  return ()
+
 let establish_connection broker fd addr =
   let ich = Lwt_io.of_fd Lwt_io.input fd in
   let och = Lwt_io.of_fd Lwt_io.output fd in
@@ -364,49 +402,14 @@ let establish_connection broker fd addr =
                   fr_body = "";
                 } >>
               handle_connection broker conn
-            with End_of_file | Sys_error _ | Unix.Unix_error _ ->
-                let pending_acks =
-                  ACKS.elements
-                    (Hashtbl.fold
-                       (fun _ subs s -> ACKS.union subs.qs_pending_acks s)
-                       conn.conn_queues
-                       ACKS.empty) in
-                eprintf "CONNECTION %d DONE with %d pending ACKS\n%!"
-                  conn.conn_id
-                  (List.length pending_acks);
-                (* remove from connection set and subscription lists *)
-                broker.b_connections <- CONNS.remove conn broker.b_connections;
-                Hashtbl.iter
-                  (fun k _ ->
-                     try
-                       let s = Hashtbl.find broker.b_topics k in
-                         s := CONNS.remove conn !s
-                     with Not_found -> ())
-                  conn.conn_topics;
-                Hashtbl.iter
-                  (fun k _ ->
-                     let rm s = SUBS.remove (conn, dummy_subscription) s in
-                     try
-                       let ls = Hashtbl.find broker.b_queues k in
-                         ls.l_ready <- rm ls.l_ready;
-                         ls.l_blocked <- rm ls.l_blocked;
-                     with Not_found -> ())
-                  conn.conn_queues;
-                (* cancel all the waiters: they will re-queue the
-                 * corresponding messages *)
-                List.iter
-                  (fun (id, sleep, w) ->
-                     (* eprintf "have to re-queue %S\n%!" id; *)
-                     wakeup w ())
-                     (* wakeup_exn wakeup Lwt.Canceled) *)
-                  pending_acks;
-                return ()
-             | e ->
-                 eprintf "GOT EXCEPTION: %s\n%!" (Printexc.to_string e);
-                 eprintf "backtrace:\n%s" (Printexc.get_backtrace ());
-                 eprintf "backtrace status: %s\n%!" (string_of_bool (Printexc.backtrace_status ()));
-                 Printexc.print_backtrace stderr;
-                 Lwt_io.abort och
+            with
+              | End_of_file | Sys_error _ | Unix.Unix_error _ ->
+                terminate_connection broker conn
+              | e ->
+                  eprintf "GOT EXCEPTION: %s\n%!" (Printexc.to_string e);
+                  eprintf "backtrace:\n%s" (Printexc.get_backtrace ());
+                  Printexc.print_backtrace stderr;
+                  Lwt_io.abort och >> terminate_connection broker conn
           end
       | _ -> Lwt_io.write och "ERROR\n\nExcepted CONNECT frame.\000\n" >>
              Lwt_io.flush och >>
