@@ -122,7 +122,7 @@ let find_recipient broker name =
               | c -> Some (ls, c)
   with Not_found -> None
 
-let send_to_recipient ~kind broker listeners conn subs msg =
+let rec send_to_recipient ~kind broker listeners conn subs msg =
   print_endline "send_to_recipient";
   let sleep, wakeup = Lwt.task () in
   let msg_id = msg.msg_id in
@@ -139,9 +139,30 @@ let send_to_recipient ~kind broker listeners conn subs msg =
         dt when dt > 0. -> [ Lwt_unix.timeout dt; sleep ]
       | _ -> [ sleep ] in
     Lwt.select threads >>
-    P.ack_msg broker.b_msg_store msg_id
+    begin
+      subs.qs_pending_acks <- ACKS.remove (msg.msg_id, sleep, wakeup)
+                                          subs.qs_pending_acks;
+      P.ack_msg broker.b_msg_store msg_id >>
+      send_saved_messages broker listeners conn subs
+    end
 
-let rec enqueue_after_timeout broker msg_id =
+and send_saved_messages broker listeners conn subs =
+
+  let do_send msg =
+    let msg_id = msg.msg_id in
+    if not (is_subs_blocked subs) then
+      try_lwt
+        send_to_recipient ~kind:Saved broker listeners conn subs msg
+      with Lwt_unix.Timeout | Lwt.Canceled ->
+        eprintf "send_saved_messages: TIMEOUT or CANCELED\n%!";
+        enqueue_after_timeout broker msg_id
+    else return () in
+
+  let wanted = subs_wanted_msgs subs in
+    P.get_queue_msgs broker.b_msg_store subs.qs_name wanted >>=
+      Lwt_util.iter do_send
+
+and enqueue_after_timeout broker msg_id =
   P.get_ack_pending_msg broker.b_msg_store msg_id >>= function
       None -> return ()
     | Some msg ->
@@ -169,22 +190,6 @@ let rec send_to_queue broker msg =
           with Lwt_unix.Timeout | Lwt.Canceled ->
             eprintf "send_new_to_queue: TIMEOUT or CANCELED\n%!";
             enqueue_after_timeout broker msg_id
-
-let rec send_saved_messages broker listeners (conn, subs) =
-
-  let do_send msg =
-    let msg_id = msg.msg_id in
-    if not (is_subs_blocked subs) then
-      try_lwt
-        send_to_recipient ~kind:Saved broker listeners conn subs msg
-      with Lwt_unix.Timeout | Lwt.Canceled ->
-        eprintf "send_saved_messages: TIMEOUT or CANCELED\n%!";
-        enqueue_after_timeout broker msg_id
-    else return () in
-
-  let wanted = subs_wanted_msgs subs in
-    P.get_queue_msgs broker.b_msg_store subs.qs_name wanted >>=
-      Lwt_util.iter do_send
 
 let new_id prefix =
   let cnt = ref 0 in
@@ -233,7 +238,7 @@ let cmd_subscribe broker conn frame =
               in Hashtbl.add broker.b_queues name ls;
                  ls
           in Lwt.ignore_result
-               (send_saved_messages broker listeners (conn, subscription));
+               (send_saved_messages broker listeners conn subscription);
              return ()
         end
   with Not_found ->
