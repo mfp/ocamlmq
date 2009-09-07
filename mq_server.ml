@@ -195,7 +195,7 @@ let find_recipient broker name =
         | Some cursor ->
             if SUBS.is_empty ls.l_ready then unblock_some_listeners ls;
             match SUBS.next cursor ls.l_ready with
-              | c when c = SUBS.min_elt ls.l_ready ->
+              | (conn, _) when conn == fst (SUBS.min_elt ls.l_ready) ->
                   (* went through all ready subscriptions, try to unblock some &
                    * give it another try *)
                   unblock_some_listeners ls;
