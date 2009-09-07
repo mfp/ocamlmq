@@ -249,39 +249,38 @@ let rec send_to_queue broker name msg = match find_recipient broker name with
                         (* FIXME: better strategy? *)
                         (* leave as non-ACKed, will eventually get it after shutdown/crash *)
                     end
-                  | Some (listeners, (conn, subs)) -> do_send listeners conn subs
+                  | Some (listeners, (conn, subs)) ->
+                      eprintf "Found a recipient for this message, sending\n%!";
+                      do_send listeners conn subs
               end
       in
          do_send listeners conn subs
 
 let rec send_saved_messages broker listeners (conn, subs) =
+
+  let do_send (msg_id, dst, timestamp, priority, ack_timeout, body) =
+    let msg =
+      { msg_id = msg_id;
+        msg_destination = Queue dst;
+        msg_priority = Int32.to_int priority;
+        msg_timestamp = CalendarLib.Calendar.to_unixfloat timestamp;
+        msg_ack_timeout = ack_timeout;
+        msg_body = body;
+      }
+    in
+      if not (is_subs_blocked subs) then
+        send_to_recipient broker listeners conn subs msg
+      else return () in
+
   let dest = subs.qs_name in
+  let wanted = Int64.of_int (subs_wanted_msgs subs) in
   PGSQL(broker.b_dbh)
       "SELECT msg_id, destination, timestamp, priority, ack_timeout, body
          FROM mq_server_msgs
         WHERE destination = $dest
      ORDER BY priority, timestamp
-        LIMIT 1"
-  >>= function
-      [] -> return ()
-    | (msg_id, dst, timestamp, priority, ack_timeout, body) :: _ ->
-       let msg =
-         { msg_id = msg_id;
-           msg_destination = Queue dst;
-           msg_priority = Int32.to_int priority;
-           msg_timestamp = CalendarLib.Calendar.to_unixfloat timestamp;
-           msg_ack_timeout = ack_timeout;
-           msg_body = body;
-         } in
-       lwt must_loop =
-         try_lwt
-           if not (is_subs_blocked subs) then
-             send_to_recipient broker listeners conn subs msg >> return true
-           else
-             return false
-         with _ -> return false
-       in if must_loop then send_saved_messages broker listeners (conn, subs)
-          else return ()
+        LIMIT $wanted"
+  >>= Lwt_util.iter do_send
 
 let send_message broker msg = match msg.msg_destination with
     Queue name -> send_to_queue broker name msg
