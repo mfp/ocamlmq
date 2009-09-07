@@ -272,12 +272,15 @@ let rec send_saved_messages broker listeners (conn, subs) =
            msg_timestamp = CalendarLib.Calendar.to_unixfloat timestamp;
            msg_ack_timeout = ack_timeout;
            msg_body = body;
-         }
-       in send_to_recipient broker listeners conn subs msg >>
-          if not (is_subs_blocked subs) then
-            send_saved_messages broker listeners (conn, subs)
-          else
-            return ()
+         } in
+       lwt send_ok =
+         try_lwt
+           send_to_recipient broker listeners conn subs msg >> return true
+         with _ -> return false
+       in match send_ok with
+           true when not (is_subs_blocked subs) ->
+             send_saved_messages broker listeners (conn, subs)
+         | _ -> return ()
 
 let send_message broker msg = match msg.msg_destination with
     Queue name -> send_to_queue broker name msg
@@ -312,7 +315,7 @@ let get_destination frame =
     else raise Not_found
 
 let cmd_subscribe broker conn frame =
-  try
+  try_lwt
     let destination = get_destination frame in
     let subscription =
       {
@@ -386,7 +389,7 @@ let cmd_disconnect broker conn frame =
   fail End_of_file
 
 let cmd_send broker conn frame =
-  try
+  try_lwt
     send_message broker
       {
         msg_id = sprintf "conn-%d:%s" conn.conn_id (new_msg_id ());
