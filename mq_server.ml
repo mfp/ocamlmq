@@ -273,14 +273,15 @@ let rec send_saved_messages broker listeners (conn, subs) =
            msg_ack_timeout = ack_timeout;
            msg_body = body;
          } in
-       lwt send_ok =
+       lwt must_loop =
          try_lwt
-           send_to_recipient broker listeners conn subs msg >> return true
+           if not (is_subs_blocked subs) then
+             send_to_recipient broker listeners conn subs msg >> return true
+           else
+             return false
          with _ -> return false
-       in match send_ok with
-           true when not (is_subs_blocked subs) ->
-             send_saved_messages broker listeners (conn, subs)
-         | _ -> return ()
+       in if must_loop then send_saved_messages broker listeners (conn, subs)
+          else return ()
 
 let send_message broker msg = match msg.msg_destination with
     Queue name -> send_to_queue broker name msg
