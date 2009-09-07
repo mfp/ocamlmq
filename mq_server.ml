@@ -74,9 +74,9 @@ type broker = {
 let send_error broker conn fmt =
   STOMP.send_error ~eol:broker.b_frame_eol conn.conn_och fmt
 
-let send_to_topic broker name msg =
+let send_new_to_topic broker msg =
   try
-    let s = Hashtbl.find broker.b_topics name in
+    let s = Hashtbl.find broker.b_topics (destination_name msg.msg_destination) in
       Lwt.ignore_result
         (Lwt_util.iter
            (fun conn -> STOMP.send_message ~eol:broker.b_frame_eol conn.conn_och msg)
@@ -159,15 +159,16 @@ let rec enqueue_after_timeout broker msg_id =
                 eprintf "enqueue_after_timeout: TIMEOUT or CANCELED!\n%!";
                 enqueue_after_timeout broker msg_id
 
-let rec send_to_queue broker queue msg = match find_recipient broker queue with
-    None -> P.save_msg broker.b_msg_store msg
-  | Some (listeners, (conn, subs)) ->
-      let msg_id = msg.msg_id in
-      try_lwt
-        send_to_recipient ~kind:New broker listeners conn subs msg
-      with Lwt_unix.Timeout | Lwt.Canceled ->
-        eprintf "send_to_queue: TIMEOUT or CANCELED\n%!";
-        enqueue_after_timeout broker msg_id
+let rec send_new_to_queue broker msg =
+  match find_recipient broker (destination_name msg.msg_destination) with
+      None -> P.save_msg broker.b_msg_store msg
+    | Some (listeners, (conn, subs)) ->
+        let msg_id = msg.msg_id in
+          try_lwt
+            send_to_recipient ~kind:New broker listeners conn subs msg
+          with Lwt_unix.Timeout | Lwt.Canceled ->
+            eprintf "send_new_to_queue: TIMEOUT or CANCELED\n%!";
+            enqueue_after_timeout broker msg_id
 
 let rec send_saved_messages broker listeners (conn, subs) =
 
@@ -184,10 +185,6 @@ let rec send_saved_messages broker listeners (conn, subs) =
   let wanted = subs_wanted_msgs subs in
     P.get_queue_msgs broker.b_msg_store subs.qs_name wanted >>=
       Lwt_util.iter do_send
-
-let send_message broker msg = match msg.msg_destination with
-    Queue name -> send_to_queue broker name msg
-  | Topic name -> send_to_topic broker name msg
 
 let new_id prefix =
   let cnt = ref 0 in
@@ -276,10 +273,11 @@ let cmd_disconnect broker conn frame =
 
 let cmd_send broker conn frame =
   try_lwt
-    send_message broker
+    let destination = STOMP.get_destination frame in
+    let msg =
       {
         msg_id = sprintf "conn-%d:%s" conn.conn_id (new_msg_id ());
-        msg_destination = STOMP.get_destination frame;
+        msg_destination = destination;
         msg_priority = 0;
         msg_timestamp = Unix.gettimeofday ();
         msg_body = frame.STOMP.fr_body;
@@ -288,6 +286,9 @@ let cmd_send broker conn frame =
              float_of_string (STOMP.get_header frame "ack-timeout")
            with _ -> 0.)
       }
+    in match destination with
+        Topic topic -> send_new_to_topic broker msg
+      | Queue queue -> send_new_to_queue broker msg
   with Not_found ->
     STOMP.send_error ~eol:broker.b_frame_eol conn.conn_och
       "Invalid or missing destination: must be of the form /queue/xxx or /topic/xxx."
