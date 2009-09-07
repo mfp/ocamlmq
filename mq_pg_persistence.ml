@@ -67,7 +67,6 @@ let get_ack_pending_msg t msg_id =
     | [] -> return None
 
 let register_ack_pending_new_msg t msg =
-  print_endline "register_ack_pending_new_msg";
   let body = msg.msg_body in
   let time = CalendarLib.Calendar.from_unixfloat msg.msg_timestamp in
   let msg_id = msg.msg_id in
@@ -78,12 +77,10 @@ let register_ack_pending_new_msg t msg =
   WithDB begin
     begin
       try_lwt
-        print_endline "SAVING";
-             PGSQL(dbh)
-               "INSERT INTO mq_server_ack_msgs(msg_id, priority, destination,
-                                               timestamp, ack_timeout, body)
-                VALUES ($msg_id, $priority, $queue, $time, $ack_timeout, $body)" >>
-               (print_endline "SAVED"; return ())
+        PGSQL(dbh)
+          "INSERT INTO mq_server_ack_msgs(msg_id, priority, destination,
+                                          timestamp, ack_timeout, body)
+           VALUES ($msg_id, $priority, $queue, $time, $ack_timeout, $body)"
       with PGOCaml.PostgreSQL_Error (s, _) ->
         print_endline "GOT PostgreSQL_Error";
         print_endline s;
@@ -112,16 +109,13 @@ let transaction t f =
   (* with e -> PGOCaml.rollback t.dbh >> fail e *)
 
 let register_ack_pending_msg t msg_id =
-  print_endline ("register_ack_pending_msg: " ^ msg_id);
   WithDB begin
-    print_endline "running";
     PGSQL(dbh)
       "INSERT INTO
         mq_server_ack_msgs(msg_id, priority, destination, timestamp, ack_timeout, body)
         (SELECT msg_id, priority, destination, timestamp, ack_timeout, body
          FROM mq_server_msgs
          WHERE msg_id = $msg_id)" >>
-    (print_endline "INSERTED"; return ()) >>
     PGSQL(dbh) "DELETE FROM mq_server_msgs WHERE msg_id = $msg_id"
   end
 

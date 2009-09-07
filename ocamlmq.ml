@@ -50,7 +50,7 @@ let () =
                         ~debug:!debug
                         () in
       lwt broker = SERVER.make_broker msg_store addr in 
-        SERVER.server_loop broker
+        SERVER.server_loop ~debug:!debug broker
     end
 
 
