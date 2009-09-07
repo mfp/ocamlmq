@@ -368,12 +368,7 @@ let terminate_connection broker conn =
     conn.conn_queues;
   (* cancel all the waiters: they will re-queue the
    * corresponding messages *)
-  List.iter
-    (fun (id, sleep, w) ->
-       (* eprintf "have to re-queue %S\n%!" id; *)
-       wakeup w ())
-       (* wakeup_exn wakeup Lwt.Canceled) *)
-    pending_acks;
+  List.iter (fun (id, t, u) -> cancel t) pending_acks;
   return ()
 
 let establish_connection broker fd addr =
