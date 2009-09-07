@@ -1,9 +1,10 @@
 
 NATIVE_ENABLED = true
+BYTE_ENABLED = true
 OCAMLOPTFLAGS = -S -inline 100
 USE_OCAMLFIND = true
 
-OCAMLFLAGS += -syntax camlp4o
+OCAMLFLAGS += -g -syntax camlp4o
 OCAMLDEPFLAGS += -syntax camlp4o
 
 OCAMLPACKS[] =
@@ -18,16 +19,20 @@ OCAMLPACKS[] =
 
 OBJECTS[] =
     extSet
+    mq_types
+    mq_stomp
+    mq_pg_persistence
     mq_server
+    ocamlmq
 
 mq_schema.ml: schema.sql generate_prepared_statements.rb
         ruby generate_prepared_statements.rb create_db $< > $@
 
-.SCANNER: scan-ocaml-mq_server.ml: mq_server.ml mq_schema.ml
+.SCANNER: scan-ocaml-mq_pg_persistence.ml: mq_pg_persistence.ml mq_schema.ml
 
-OCamlProgram(mq_server, $(OBJECTS))
+OCamlProgram(ocamlmq, $(OBJECTS))
 
-.DEFAULT: mq_server$(EXE)
+.DEFAULT: ocamlmq$(EXE)
 
 .PHONY: clean
 

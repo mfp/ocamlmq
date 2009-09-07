@@ -10,4 +10,4 @@
 *.s
 gmon.out
 /mq_schema.ml
-/mq_server
+/ocamlmq

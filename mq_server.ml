@@ -1,11 +1,31 @@
 open Printf
 open Lwt
-open ExtString
 
+module type PERSISTENCE =
+sig
+  type t
+
+  val save_msg : t -> Mq_types.message -> unit Lwt.t
+  val register_ack_pending_new_msg : t -> Mq_types.message -> unit Lwt.t
+  val register_ack_pending_msg : t -> string -> unit Lwt.t
+  val get_ack_pending_msg : t -> string -> Mq_types.message option Lwt.t
+  val ack_msg : t -> string -> unit Lwt.t
+  val unack_msg : t -> string -> unit Lwt.t
+  val get_queue_msgs : t -> string -> int -> Mq_types.message list Lwt.t
+  val crash_recovery : t -> unit Lwt.t
+end
+
+module Make(P : PERSISTENCE) =
+struct
+
+open Mq_types
+module STOMP = Mq_stomp
 module ACKS = Set.Make(struct
                          type t = string * unit Lwt.t * unit Lwt.u
                          let compare (s1, _, _) (s2, _, _) = String.compare s1 s2
                        end)
+
+type message_kind = New | Old | Requeued
 
 type subscription = {
   qs_name : string;
@@ -36,121 +56,33 @@ module SUBS = ExtSet.Make(struct
                             let compare (t1, _) (t2, _) = t2.conn_id - t1.conn_id
                           end)
 
-INCLUDE "mq_schema.ml"
-
-module PGOCaml = PGOCaml_generic.Make(struct include Lwt include Lwt_chan end)
-
 type listeners = {
   mutable l_ready : SUBS.t;
   mutable l_blocked : SUBS.t;
   mutable l_last_sent : SUBS.elt option;
 }
 
-type 'a broker = {
+type broker = {
   mutable b_connections : CONNS.t;
   b_queues : (string, listeners) Hashtbl.t;
   b_topics : (string, CONNS.t ref) Hashtbl.t;
   b_socket : Lwt_unix.file_descr;
   b_frame_eol : bool;
-  b_dbh : 'a PGOCaml.t;
+  b_msg_store : P.t;
 }
 
-type destination = Queue of string | Topic of string
-
-type message = {
-  msg_id : string;
-  msg_destination : destination;
-  msg_priority : int;
-  msg_timestamp : float;
-  msg_body : string;
-  msg_ack_timeout : float;
-}
-
-type stomp_frame = {
-  fr_command : string;
-  fr_headers : (string * string) list;
-  fr_body : string;
-}
-
-let string_of_destination = function
-    Topic n -> "/topic/" ^ n
-  | Queue n -> "/queue/" ^ n
-
-let destination_name = function Topic n | Queue n -> n
-
-let write_stomp_frame ~eol och frame =
-  let b = Buffer.create
-            (80 * List.length frame.fr_headers + String.length frame.fr_body)
-  in
-    bprintf b "%s\n" frame.fr_command;
-    List.iter
-      (fun (k, v) -> if k <> "content-length" then bprintf b "%s: %s\n" k v)
-      frame.fr_headers;
-    bprintf b "content-length: %d\n" (String.length frame.fr_body);
-    bprintf b "\n";
-    Buffer.add_string b frame.fr_body;
-    if eol then
-      Buffer.add_string b "\000\n"
-    else
-      Buffer.add_string b "\000";
-    Lwt_io.write och (Buffer.contents b) >> Lwt_io.flush och
-
-let handle_receipt ~eol och frame =
-  try
-    let receipt = List.assoc "receipt" frame.fr_headers in
-      write_stomp_frame ~eol och
-        { fr_command = "RECEIPT";
-          fr_headers = ["receipt-id", receipt];
-          fr_body = "" }
-  with Not_found -> return ()
-
-let send_message broker msg conn =
-  write_stomp_frame ~eol:broker.b_frame_eol conn.conn_och
-    {
-      fr_command = "MESSAGE";
-      fr_headers = [
-        "message-id", msg.msg_id;
-        "destination", string_of_destination msg.msg_destination;
-        "content-length", string_of_int (String.length msg.msg_body);
-      ];
-      fr_body = msg.msg_body
-    }
+let send_error broker conn fmt =
+  STOMP.send_error ~eol:broker.b_frame_eol conn.conn_och fmt
 
 let send_to_topic broker name msg =
   try
     let s = Hashtbl.find broker.b_topics name in
       Lwt.ignore_result
-        (Lwt_util.iter (send_message broker msg) (CONNS.elements !s));
+        (Lwt_util.iter
+           (fun conn -> STOMP.send_message ~eol:broker.b_frame_eol conn.conn_och msg)
+           (CONNS.elements !s));
       return ()
   with Not_found -> return ()
-
-let save_message broker queue msg =
-  let body = msg.msg_body in
-  let t = CalendarLib.Calendar.from_unixfloat msg.msg_timestamp in
-  let msg_id = msg.msg_id in
-  let priority = Int32.of_int msg.msg_priority in
-  let ack_timeout = msg.msg_ack_timeout in
-    (* eprintf "Saving message %S.\n%!" msg_id; *)
-    PGSQL(broker.b_dbh)
-      "INSERT INTO mq_server_msgs(msg_id, priority, destination, timestamp,
-                                  ack_timeout, body)
-              VALUES ($msg_id, $priority, $queue, $t, $ack_timeout, $body)"
-
-let recover_non_acked_msg broker msg_id =
-  PGSQL(broker.b_dbh)
-    "SELECT priority, destination, timestamp, ack_timeout, body
-       FROM mq_server_ack_msgs
-      WHERE msg_id = $msg_id"
-  >>= function
-    | (priority, destination, timestamp, ack_timeout, body) :: _ ->
-        return
-          (Some { msg_id = msg_id;
-                  msg_priority = Int32.to_int priority;
-                  msg_destination = Queue destination;
-                  msg_timestamp = CalendarLib.Calendar.to_unixfloat timestamp;
-                  msg_ack_timeout = ack_timeout;
-                  msg_body = body })
-    | [] -> return None
 
 let subs_wanted_msgs subs =
   if subs.qs_prefetch <= 0 then max_int
@@ -172,20 +104,6 @@ let unblock_some_listeners listeners =
     listeners.l_ready <- SUBS.union listeners.l_ready unblocked;
     listeners.l_blocked <- SUBS.diff listeners.l_blocked unblocked
 
-let enqueue_non_acked_msg broker msg =
-  let dbh = broker.b_dbh in
-  let id = msg.msg_id in
-  (* eprintf "enqueueing non-ACKed msg %S\n%!" id; *)
-  begin try_lwt
-    PGSQL(dbh)
-      "INSERT INTO mq_server_ack_msgs
-         (SELECT * FROM mq_server_msgs WHERE msg_id = $id)"
-  with PGOCaml.PostgreSQL_Error _ -> return ()
-    (* msg_id is not unique: happens if we had an ACK timeout and
-     * requeued the message *)
-  end >>
-  PGSQL(dbh) "DELETE FROM mq_server_msgs WHERE msg_id = $id"
-
 let find_recipient broker name =
   try
     let ls = Hashtbl.find broker.b_queues name in
@@ -203,84 +121,69 @@ let find_recipient broker name =
               | c -> Some (ls, c)
   with Not_found -> None
 
-let send_to_recipient broker listeners conn subs msg =
+let send_to_recipient ~kind broker listeners conn subs msg =
+  print_endline "send_to_recipient";
   let sleep, wakeup = Lwt.task () in
   let msg_id = msg.msg_id in
     subs.qs_pending_acks <- ACKS.add (msg.msg_id, sleep, wakeup)
                                      subs.qs_pending_acks;
     listeners.l_last_sent <- Some (conn, subs);
     if is_subs_blocked subs then block_subscription listeners (conn, subs);
-    enqueue_non_acked_msg broker msg >>
-    send_message broker msg conn >>
+    (match kind with
+         Requeued -> (* the message was already in ACK-pending set *) return ()
+       | New -> P.register_ack_pending_new_msg broker.b_msg_store msg
+       | Old -> (* just move to ACK *)
+           P.register_ack_pending_msg broker.b_msg_store msg_id) >>
+    STOMP.send_message ~eol:broker.b_frame_eol conn.conn_och msg >>
     let threads = match msg.msg_ack_timeout with
         dt when dt > 0. -> [ Lwt_unix.timeout dt; sleep ]
       | _ -> [ sleep ] in
     Lwt.select threads >>
-    PGSQL(broker.b_dbh)
-      "DELETE FROM mq_server_ack_msgs WHERE msg_id = $msg_id"
+    P.ack_msg broker.b_msg_store msg_id
 
-let rec send_to_queue broker name msg = match find_recipient broker name with
-    None -> save_message broker name msg
+let rec enqueue_after_timeout broker msg_id =
+  P.get_ack_pending_msg broker.b_msg_store msg_id >>= function
+      None -> return ()
+    | Some msg ->
+        let queue = destination_name msg.msg_destination in
+        match find_recipient broker queue with
+          | None -> begin (* move to main table *)
+              eprintf "No recipient for non-ACK message, saving.\n%!";
+              P.unack_msg broker.b_msg_store msg_id
+            end
+          | Some (listeners, (conn, subs)) ->
+              eprintf "Found a recipient for this message, sending\n%!";
+              try_lwt
+                send_to_recipient ~kind:Requeued broker listeners conn subs msg
+              with Lwt_unix.Timeout | Lwt.Canceled ->
+                eprintf "enqueue_after_timeout: TIMEOUT or CANCELED!\n%!";
+                enqueue_after_timeout broker msg_id
+
+let rec send_to_queue broker queue msg = match find_recipient broker queue with
+    None -> P.save_msg broker.b_msg_store msg
   | Some (listeners, (conn, subs)) ->
       let msg_id = msg.msg_id in
-      let rec do_send listeners conn subs =
-        try_lwt
-          send_to_recipient broker listeners conn subs msg
-          (* with Lwt_unix.Timeout | Lwt.Canceled -> *)
-        with _ ->
-          eprintf "TIMEOUT or CANCELED\n%!";
-          (* didn't get ACK within msg_ack_timeout, enqueue msg again *)
-          (* We don't delete from the mq_server_ack_msgs tbl since a crash
-           * before calling send_to_queue would mean the msg is LOST! *)
-          recover_non_acked_msg broker msg_id >>= function
-              None -> return ()
-            | Some msg -> begin
-                match find_recipient broker name with
-                  | None -> begin (* move to main table *)
-                      (* eprintf "No recipient for non-ACK message, saving.\n%!"; *)
-                      PGOCaml.begin_work broker.b_dbh >>
-                      try_lwt
-                        save_message broker name msg >>
-                        PGSQL(broker.b_dbh)
-                          "DELETE FROM mq_server_ack_msgs WHERE msg_id = $msg_id" >>
-                        PGOCaml.commit broker.b_dbh
-                      with _ ->
-                        PGOCaml.rollback broker.b_dbh
-                        (* FIXME: better strategy? *)
-                        (* leave as non-ACKed, will eventually get it after shutdown/crash *)
-                    end
-                  | Some (listeners, (conn, subs)) ->
-                      eprintf "Found a recipient for this message, sending\n%!";
-                      do_send listeners conn subs
-              end
-      in
-         do_send listeners conn subs
+      try_lwt
+        send_to_recipient ~kind:New broker listeners conn subs msg
+      with Lwt_unix.Timeout | Lwt.Canceled ->
+        eprintf "send_to_queue: TIMEOUT or CANCELED\n%!";
+        enqueue_after_timeout broker msg_id
 
 let rec send_saved_messages broker listeners (conn, subs) =
 
-  let do_send (msg_id, dst, timestamp, priority, ack_timeout, body) =
-    let msg =
-      { msg_id = msg_id;
-        msg_destination = Queue dst;
-        msg_priority = Int32.to_int priority;
-        msg_timestamp = CalendarLib.Calendar.to_unixfloat timestamp;
-        msg_ack_timeout = ack_timeout;
-        msg_body = body;
-      }
-    in
-      if not (is_subs_blocked subs) then
-        send_to_recipient broker listeners conn subs msg
-      else return () in
+  let do_send msg =
+    let msg_id = msg.msg_id in
+    if not (is_subs_blocked subs) then
+      try_lwt
+        send_to_recipient ~kind:Old broker listeners conn subs msg
+      with Lwt_unix.Timeout | Lwt.Canceled ->
+        eprintf "send_saved_messages: TIMEOUT or CANCELED\n%!";
+        enqueue_after_timeout broker msg_id
+    else return () in
 
-  let dest = subs.qs_name in
-  let wanted = Int64.of_int (subs_wanted_msgs subs) in
-  PGSQL(broker.b_dbh)
-      "SELECT msg_id, destination, timestamp, priority, ack_timeout, body
-         FROM mq_server_msgs
-        WHERE destination = $dest
-     ORDER BY priority, timestamp
-        LIMIT $wanted"
-  >>= Lwt_util.iter do_send
+  let wanted = subs_wanted_msgs subs in
+    P.get_queue_msgs broker.b_msg_store subs.qs_name wanted >>=
+      Lwt_util.iter do_send
 
 let send_message broker msg = match msg.msg_destination with
     Queue name -> send_to_queue broker name msg
@@ -296,33 +199,15 @@ let new_msg_id = new_id "msg"
 
 let new_conn_id = let n = ref 0 in fun () -> incr n; !n
 
-let topic_re = Str.regexp "/topic/"
-let queue_re = Str.regexp "/queue/"
-
-let send_error ~eol conn fmt =
-  ksprintf
-    (fun msg ->
-       write_stomp_frame ~eol conn.conn_och
-         { fr_command = "ERROR"; fr_headers = []; fr_body = msg; })
-    fmt
-
-let get_destination frame =
-  let destination = List.assoc "destination" frame.fr_headers in
-    if Str.string_match topic_re destination 0 then
-      Topic (String.slice ~first:7 destination)
-    else if Str.string_match queue_re destination 0 then
-      Queue (String.slice ~first:7 destination)
-    else raise Not_found
-
 let cmd_subscribe broker conn frame =
   try_lwt
-    let destination = get_destination frame in
+    let destination = STOMP.get_destination frame in
     let subscription =
       {
         qs_name = (match destination with Topic n | Queue n -> n);
         qs_prefetch =
           (try
-             int_of_string (List.assoc "prefetch" frame.fr_headers)
+             int_of_string (STOMP.get_header frame "prefetch")
            with _ -> -1);
         qs_pending_acks = ACKS.empty;
       }
@@ -350,16 +235,17 @@ let cmd_subscribe broker conn frame =
                          l_last_sent = None }
               in Hashtbl.add broker.b_queues name ls;
                  ls
-          in
-            send_saved_messages broker listeners (conn, subscription)
+          in Lwt.ignore_result
+               (send_saved_messages broker listeners (conn, subscription));
+             return ()
         end
   with Not_found ->
-    send_error ~eol:broker.b_frame_eol conn
+    STOMP.send_error ~eol:broker.b_frame_eol conn.conn_och
       "Invalid or missing destination: must be of the form /queue/xxx or /topic/xxx."
 
 let cmd_unsubscribe broker conn frame =
   try
-    match get_destination frame with
+    match STOMP.get_destination frame with
         Topic name -> begin
           try
             let s = Hashtbl.find broker.b_topics name in
@@ -380,7 +266,7 @@ let cmd_unsubscribe broker conn frame =
           with Not_found -> return ()
         end
   with Not_found ->
-    send_error ~eol:broker.b_frame_eol conn
+    STOMP.send_error ~eol:broker.b_frame_eol conn.conn_och
       "Invalid or missing destination: must be of the form /queue/xxx or /topic/xxx."
 
 let cmd_disconnect broker conn frame =
@@ -393,17 +279,17 @@ let cmd_send broker conn frame =
     send_message broker
       {
         msg_id = sprintf "conn-%d:%s" conn.conn_id (new_msg_id ());
-        msg_destination = get_destination frame;
+        msg_destination = STOMP.get_destination frame;
         msg_priority = 0;
         msg_timestamp = Unix.gettimeofday ();
-        msg_body = frame.fr_body;
+        msg_body = frame.STOMP.fr_body;
         msg_ack_timeout =
           (try
-             float_of_string (List.assoc "ack-timeout" frame.fr_headers)
+             float_of_string (STOMP.get_header frame "ack-timeout")
            with _ -> 0.)
       }
   with Not_found ->
-    send_error ~eol:broker.b_frame_eol conn
+    STOMP.send_error ~eol:broker.b_frame_eol conn.conn_och
       "Invalid or missing destination: must be of the form /queue/xxx or /topic/xxx."
 
 let ignore_command broker conn frame = return ()
@@ -414,7 +300,7 @@ let register_command (name, f) =
 
 let with_receipt f broker conn frame =
   f broker conn frame >>
-  handle_receipt ~eol:broker.b_frame_eol conn.conn_och frame
+  STOMP.handle_receipt ~eol:broker.b_frame_eol conn.conn_och frame
 
 let () =
   List.iter register_command
@@ -428,67 +314,16 @@ let () =
       "ABORT", with_receipt ignore_command;
     ]
 
-let read_stomp_headers ch =
-  let rec loop acc =
-    Lwt_io.read_line ch >>= function
-        "" -> return acc
-      | s ->
-          let k, v = String.split s ":" in
-            loop ((String.lowercase k, String.strip v) :: acc)
-  in loop []
-
-let rec read_stomp_command ch =
-  Lwt_io.read_line ch >>= function
-      "" -> read_stomp_command ch
-    | l -> return l
-
-let read_until_zero ?(eol = true) ich =
-  let b = Buffer.create 80 in
-    if eol then begin
-      let rec loop () =
-        Lwt_io.read_line ich >>= function
-            "" -> Buffer.add_char b '\n'; loop ()
-          | l when l.[String.length l - 1] = '\000' ->
-              Buffer.add_substring b l 0 (String.length l - 1);
-              return (Buffer.contents b)
-          | l -> Buffer.add_string b l;
-                 Buffer.add_char b '\n';
-                 loop ()
-      in loop ()
-    end else begin
-      let rec loop () =
-        Lwt_io.read_char ich >>= function
-            '\000' -> return (Buffer.contents b)
-          | c -> Buffer.add_char b c; loop ()
-      in loop ()
-    end
-
-let read_stomp_frame ?(eol = true) ich =
-  try_lwt
-    lwt cmd = read_stomp_command ich in
-    lwt headers = read_stomp_headers ich in
-    lwt body =
-      try
-        let len = int_of_string (List.assoc "content-length" headers) in
-        let body = String.create len in
-        lwt () = Lwt_io.read_into_exactly ich body 0 len in
-          lwt (_ : char) = Lwt_io.read_char ich in
-            (* FIXME: check that it's \0 ? *)
-            return body
-      with Not_found -> read_until_zero ~eol ich
-    in return { fr_command = cmd; fr_headers = headers; fr_body = body }
-
-
 let handle_frame broker conn frame =
   try
-    Hashtbl.find command_handlers (String.uppercase frame.fr_command)
+    Hashtbl.find command_handlers (String.uppercase frame.STOMP.fr_command)
       broker conn frame
   with Not_found ->
-    send_error ~eol:broker.b_frame_eol conn "Unknown command %S." frame.fr_command
+    send_error broker conn "Unknown command %S." frame.STOMP.fr_command
 
 let handle_connection broker conn =
   let rec loop () =
-    lwt frame = read_stomp_frame ~eol:broker.b_frame_eol conn.conn_ich in
+    lwt frame = STOMP.read_stomp_frame ~eol:broker.b_frame_eol conn.conn_ich in
     handle_frame broker conn frame >>
     loop ()
   in loop ()
@@ -496,8 +331,8 @@ let handle_connection broker conn =
 let establish_connection broker fd addr =
   let ich = Lwt_io.of_fd Lwt_io.input fd in
   let och = Lwt_io.of_fd Lwt_io.output fd in
-  lwt frame = read_stomp_frame ~eol:broker.b_frame_eol ich in
-    match String.uppercase frame.fr_command with
+  lwt frame = STOMP.read_stomp_frame ~eol:broker.b_frame_eol ich in
+    match String.uppercase frame.STOMP.fr_command with
         "CONNECT" ->
             (* TODO: prefetch *)
           let conn =
@@ -512,23 +347,23 @@ let establish_connection broker fd addr =
             }
           in begin
             try_lwt
-              write_stomp_frame ~eol:broker.b_frame_eol och
+              STOMP.write_stomp_frame ~eol:broker.b_frame_eol och
                 {
-                  fr_command = "CONNECTED";
+                  STOMP.fr_command = "CONNECTED";
                   fr_headers = ["session", string_of_int conn.conn_id];
                   fr_body = "";
                 } >>
               handle_connection broker conn
-            with End_of_file | Unix.Unix_error _ ->
+            with End_of_file | Sys_error _ | Unix.Unix_error _ ->
                 let pending_acks =
                   ACKS.elements
                     (Hashtbl.fold
                        (fun _ subs s -> ACKS.union subs.qs_pending_acks s)
                        conn.conn_queues
                        ACKS.empty) in
-                (* eprintf "CONNECTION %d DONE with %d pending ACKS\n%!" *)
-                  (* conn.conn_id *)
-                  (* (List.length pending_acks); *)
+                eprintf "CONNECTION %d DONE with %d pending ACKS\n%!"
+                  conn.conn_id
+                  (List.length pending_acks);
                 (* remove from connection set and subscription lists *)
                 broker.b_connections <- CONNS.remove conn broker.b_connections;
                 Hashtbl.iter
@@ -557,95 +392,35 @@ let establish_connection broker fd addr =
                   pending_acks;
                 return ()
              | e ->
-                 (* eprintf "GOT EXCEPTION: %s" (Printexc.to_string e); *)
+                 eprintf "GOT EXCEPTION: %s\n%!" (Printexc.to_string e);
+                 eprintf "backtrace:\n%s" (Printexc.get_backtrace ());
+                 eprintf "backtrace status: %s\n%!" (string_of_bool (Printexc.backtrace_status ()));
+                 Printexc.print_backtrace stderr;
                  Lwt_io.abort och
           end
       | _ -> Lwt_io.write och "ERROR\n\nExcepted CONNECT frame.\000\n" >>
              Lwt_io.flush och >>
              Lwt_io.abort ich
 
-let recover_unacked_messages dbh =
-  eprintf "Recovering from crash...\n%!";
-  PGOCaml.begin_work dbh >>
-  try_lwt
-    lwt n = PGSQL(dbh) "SELECT COUNT(*) FROM mq_server_ack_msgs" in
-    PGSQL(dbh) "INSERT INTO mq_server_msgs (SELECT * from mq_server_ack_msgs)" >>
-    PGSQL(dbh) "DELETE FROM mq_server_ack_msgs" >>
-    ((match n with
-         Some nmsgs :: _ -> eprintf "Recovered %Ld messages.\n%!" nmsgs;
-       | _ -> eprintf "No messages found.\n%!");
-    PGOCaml.commit dbh)
-  with _ ->
-    eprintf "Couldn't recover messages.\n%!";
-    PGOCaml.rollback dbh >>
-    fail (Failure "Couldn't recover non-ACKed messages from earlier crash.")
-
-let make_broker ?(frame_eol = true) dbh address =
+let make_broker ?(frame_eol = true) msg_store address =
   let sock = Lwt_unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
   Lwt_unix.setsockopt sock Unix.SO_REUSEADDR true;
   Lwt_unix.bind sock address;
   Lwt_unix.listen sock 1024;
-  {
+  return {
     b_connections = CONNS.empty;
     b_queues = Hashtbl.create 13;
     b_topics = Hashtbl.create 13;
     b_socket = sock;
     b_frame_eol = frame_eol;
-    b_dbh = dbh;
+    b_msg_store = msg_store;
   }
 
-let serve_broker broker =
+let server_loop broker =
   let rec loop () =
     lwt (fd, addr) = Lwt_unix.accept broker.b_socket in
       ignore_result (establish_connection broker fd addr);
       loop ()
   in
-    recover_unacked_messages broker.b_dbh >> loop ()
-
-let set_some_string r = Arg.String (fun s -> r := Some s)
-let set_some_int r = Arg.Int (fun n -> r := Some n)
-
-let db_host = ref None
-let db_port = ref None
-let db_database = ref None
-let db_user = ref None
-let db_password = ref None
-let db_unix_sock_dir = ref None
-let port = ref 44444
-
-let params =
-  Arg.align
-    [
-      "-dbhost", set_some_string db_host, "HOST Database server host.";
-      "-dbport", set_some_int db_port, "HOST Database server port.";
-      "-dbdatabase", set_some_string db_database, "DATABASE Database name.";
-      "-dbsockdir", set_some_string db_password, "DIR Database UNIX domain socket dir.";
-      "-dbuser", set_some_string db_user, "USER Database user.";
-      "-dbpassword", set_some_string db_password, "PASSWORD Database password.";
-      "-port", Arg.Set_int port, "PORT Port to listen at.";
-    ]
-
-let usage_message = "Usage: mq_server [options]"
-
-let _ = Sys.set_signal Sys.sigpipe Sys.Signal_ignore
-
-let () =
-  Arg.parse
-    params
-    (fun s -> eprintf "Unknown argument: %S\n%!" s;
-              Arg.usage params usage_message;
-              exit 1)
-    usage_message;
-  let addr = Unix.ADDR_INET (Unix.inet_addr_any, !port) in
-    Lwt_unix.run begin
-      lwt dbh = PGOCaml.connect
-                  ?host:!db_host
-                  ?port:!db_port
-                  ?database:!db_database
-                  ?unix_domain_socket_dir:!db_unix_sock_dir
-                  ?user:!db_user
-                  ?password:!db_password
-                  ()
-      in serve_broker (make_broker dbh addr)
-    end
-
+    P.crash_recovery broker.b_msg_store >> loop ()
+end (* Make functor *)
