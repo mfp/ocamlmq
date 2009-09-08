@@ -12,6 +12,6 @@ CREATE TABLE mq_server_msgs(
 CREATE TABLE mq_server_ack_msgs(LIKE mq_server_msgs INCLUDING DEFAULTS);
 
 CREATE INDEX mq_server_msgs_destination_priority_timestamp ON mq_server_msgs
-       USING BTREE(priority, timestamp);
+       USING BTREE(destination, priority, timestamp);
 
 CREATE UNIQUE INDEX mq_server_ack_msgs_msg_id ON mq_server_ack_msgs USING BTREE(msg_id);
