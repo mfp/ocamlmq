@@ -8,8 +8,14 @@ temp_stmts = stmts.map do |s|
   %[PGSQL(dbh) "execute" "#{s.gsub(/"/, "\\\"")};"]
 end
 
+stmts = stmts.map{ |s| %[PGSQL(dbh) "#{s.gsub(/"/, "\\\"")};"] }
+
 puts <<EOF
+let #{funcname}_temp dbh =
+
+#{temp_stmts.join(" >> \n")}
+
 let #{funcname} dbh =
 
-#{temp_stmts.join(";\n")}
+#{stmts.join(" >> \n")}
 EOF

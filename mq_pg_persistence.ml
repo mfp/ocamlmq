@@ -2,14 +2,16 @@ open Printf
 open Mq_types
 open Lwt
 
-INCLUDE "mq_schema.ml"
-
 module PGOCaml = PGOCaml_generic.Make(struct include Lwt include Lwt_chan end)
+
+INCLUDE "mq_schema.ml"
 
 type t = {
   dbconns : PGOCaml.pa_pg_data PGOCaml.t Lwt_pool.t;
   debug : bool
 }
+
+let initialize t = Lwt_pool.use t.dbconns create_db
 
 let connect
       ?host ?port ?unix_domain_socket_dir ?database ?user ?password

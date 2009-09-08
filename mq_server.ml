@@ -8,6 +8,8 @@ module type PERSISTENCE =
 sig
   type t
 
+  val initialize : t -> unit Lwt.t
+
   val save_msg : t -> Mq_types.message -> unit Lwt.t
   val register_ack_pending_new_msg : t -> Mq_types.message -> unit Lwt.t
 
