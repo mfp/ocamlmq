@@ -88,7 +88,7 @@ let register_ack_pending_new_msg t msg =
   let ack_timeout = msg.msg_ack_timeout in
   let queue = destination_name msg.msg_destination in
   if t.debug then eprintf "Saving non-ACKed message %S.\n%!" msg_id;
-  WithDB begin
+  WithDB_trans begin
     begin
       try_lwt
         PGSQL(dbh)
@@ -152,7 +152,7 @@ let ack_msg t msg_id =
   WithDB(PGSQL(dbh) "DELETE FROM mq_server_ack_msgs WHERE msg_id = $msg_id")
 
 let unack_msg t msg_id =
-  WithDB begin
+  WithDB_trans begin
     PGSQL(dbh)
       "INSERT INTO
         mq_server_msgs(msg_id, priority, destination, timestamp, ack_timeout, body)
@@ -169,7 +169,7 @@ let count_queue_msgs t queue =
       | _ -> return 0L
 
 let crash_recovery t =
-  WithDB begin
+  WithDB_trans begin
     if t.debug then eprintf "Recovering from crash...\n%!";
     PGOCaml.begin_work dbh >>
     try_lwt
