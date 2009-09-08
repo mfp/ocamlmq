@@ -10,6 +10,7 @@ let db_database = ref None
 let db_user = ref None
 let db_password = ref None
 let db_unix_sock_dir = ref None
+let db_max_conns = ref 10
 let port = ref 44444
 let debug = ref false
 let initdb = ref false
@@ -23,6 +24,7 @@ let params =
       "-dbsockdir", set_some_string db_password, "DIR Database UNIX domain socket dir.";
       "-dbuser", set_some_string db_user, "USER Database user.";
       "-dbpassword", set_some_string db_password, "PASSWORD Database password.";
+      "-dbmaxconns", Arg.Set_int db_max_conns, "NUM Maximum size of DB connection pool.";
       "-port", Arg.Set_int port, "PORT Port to listen at.";
       "-initdb", Arg.Set initdb, " Initialize the database (create required tables).";
       "-debug", Arg.Set debug, " Write debug info to stderr.";
@@ -53,6 +55,7 @@ let () =
             ?user:!db_user
             ?password:!db_password
             ~debug:!debug
+            ~max_conns:!db_max_conns
             ()
         with _ -> (* counldn't connect to DB *)
           eprintf "Could not connect to DB, use the -db* options.\n%!";
