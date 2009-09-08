@@ -519,7 +519,8 @@ let server_loop ?(debug = false) broker =
   let broker = { broker with b_debug = debug } in
   let rec loop () =
     lwt (fd, addr) = Lwt_unix.accept broker.b_socket in
-      ignore_result (establish_connection broker fd addr);
+      ignore_result
+        (try_lwt establish_connection broker fd addr with _ -> return ());
       loop ()
   in
     P.crash_recovery broker.b_msg_store >> loop ()
