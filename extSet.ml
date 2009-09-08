@@ -1,4 +1,10 @@
 
+module type S =
+sig
+  include Set.S
+  val next : elt -> t -> elt
+end
+
 module Make(Ord : Set.OrderedType) =
 struct
   include Set.Make(Ord)

@@ -1,8 +1,8 @@
-
 (** Sets with extra functionality *)
-module Make : functor (Ord : Set.OrderedType) -> 
+
+module type S =
 sig
-  include Set.S with type elt = Ord.t
+  include Set.S
 
   (** Return the "next" element when considering the set as a circular list.
     * [next e t] returns either the first element greater than [e], or
@@ -11,3 +11,5 @@ sig
     * *)
   val next : elt -> t -> elt
 end
+
+module Make : functor (Ord : Set.OrderedType) -> S with type elt = Ord.t
