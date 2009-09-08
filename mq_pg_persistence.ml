@@ -31,6 +31,14 @@ let msg_of_tuple (msg_id, dst, timestamp, priority, ack_timeout, body) =
 let with_db t f = Lwt_pool.use t.dbconns f
 
 DEFINE WithDB(x) = with_db t (fun dbh -> x)
+DEFINE WithDB_trans(x) =
+  with_db t
+    (fun dbh ->
+       PGOCaml.begin_work dbh >>
+       try_lwt
+         lwt y = x in
+         PGOCaml.commit dbh >> return y
+       with e -> PGOCaml.rollback dbh >> fail e)
 
 let save_msg t msg = match msg.msg_destination with
     Topic _ -> return ()
@@ -96,27 +104,21 @@ let register_ack_pending_new_msg t msg =
     PGSQL(dbh) "DELETE FROM mq_server_msgs WHERE msg_id = $msg_id"
   end
 
-let transaction t f =
-  try_lwt
-    with_db t f
-  with e ->
-    print_endline "got exception in SQL transaction";
-    print_endline (Printexc.to_string e);
-    return ()
-  (* PGOCaml.begin_work t.dbh >> *)
-  (* try_lwt *)
-    (* f t.dbh >> (print_endline "finished"; PGOCaml.commit t.dbh) *)
-  (* with e -> PGOCaml.rollback t.dbh >> fail e *)
-
 let register_ack_pending_msg t msg_id =
-  WithDB begin
+  WithDB_trans begin
+    lwt count =
+      PGSQL(dbh) "SELECT COUNT(*) FROM mq_server_msgs WHERE msg_id = $msg_id" in
     PGSQL(dbh)
       "INSERT INTO
         mq_server_ack_msgs(msg_id, priority, destination, timestamp, ack_timeout, body)
         (SELECT msg_id, priority, destination, timestamp, ack_timeout, body
          FROM mq_server_msgs
          WHERE msg_id = $msg_id)" >>
-    PGSQL(dbh) "DELETE FROM mq_server_msgs WHERE msg_id = $msg_id"
+    PGSQL(dbh) "DELETE FROM mq_server_msgs WHERE msg_id = $msg_id" >>
+   (* if count was 0 / undefined, we didn't actually instead it in the ACK set *)
+    match count with
+        Some c :: _ -> return (c = 1L)
+      | _ -> return false
   end
 
 let ack_msg t msg_id =

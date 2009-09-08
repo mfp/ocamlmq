@@ -1,13 +1,18 @@
 open Printf
 open Lwt
 
+(** Simple STOMP message queue. *)
+
+(** Message store. *)
 module type PERSISTENCE =
 sig
   type t
 
   val save_msg : t -> Mq_types.message -> unit Lwt.t
   val register_ack_pending_new_msg : t -> Mq_types.message -> unit Lwt.t
-  val register_ack_pending_msg : t -> string -> unit Lwt.t
+
+  (** Returns [false] if the msg was already in the ACK-pending set. *)
+  val register_ack_pending_msg : t -> string -> bool Lwt.t
   val get_ack_pending_msg : t -> string -> Mq_types.message option Lwt.t
   val ack_msg : t -> string -> unit Lwt.t
   val unack_msg : t -> string -> unit Lwt.t
@@ -160,10 +165,16 @@ let rec send_to_recipient ~kind broker listeners conn subs msg =
     Hashtbl.replace conn.conn_pending_acks msg_id wakeup;
     listeners.l_last_sent <- Some (conn, subs);
     if is_subs_blocked (conn, subs) then block_subscription listeners (conn, subs);
-    (match kind with
-         Ack_pending -> (* the message was already in ACK-pending set *) return ()
+
+    (* if kind is Saved, the msg is believed not to be in the ACK-pending set;
+     * if it actually is, this means it was already sent to some other conn,
+     * so we don't try to send it again *)
+    lwt must_send = (match kind with
+         Ack_pending -> (* the message was already in ACK-pending set *) return true
        | Saved -> (* just move to ACK *)
-           P.register_ack_pending_msg broker.b_msg_store msg_id) >>
+           P.register_ack_pending_msg broker.b_msg_store msg_id) in
+    if not must_send then return () else
+
     STOMP.send_message ~eol:broker.b_frame_eol conn.conn_och msg >>
     let threads = match msg.msg_ack_timeout with
         dt when dt > 0. -> [ Lwt_unix.timeout dt; sleep ]
