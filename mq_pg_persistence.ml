@@ -127,6 +127,27 @@ let register_ack_pending_msg t msg_id =
       | _ -> return false
   end
 
+let get_msg_for_delivery t queue =
+  WithDB_trans begin
+    lwt tuples =
+      PGSQL(dbh)
+        "SELECT msg_id, destination, timestamp, priority, ack_timeout, body
+           FROM mq_server_msgs
+          WHERE destination = $queue
+       ORDER BY priority, timestamp
+          LIMIT 1"
+    in match tuples with
+        (id, dest, time, prio, timeout, body) as tuple :: _ ->
+          let msg = msg_of_tuple tuple in
+            PGSQL(dbh)
+              "INSERT INTO mq_server_ack_msgs(msg_id, destination, timestamp,
+                                              priority, ack_timeout, body)
+               VALUES($id, $dest, $time, $prio, $timeout, $body)" >>
+            PGSQL(dbh) "DELETE FROM mq_server_msgs WHERE msg_id = $id" >>
+            return (Some msg)
+      | [] -> return None
+  end
+
 let ack_msg t msg_id =
   WithDB(PGSQL(dbh) "DELETE FROM mq_server_ack_msgs WHERE msg_id = $msg_id")
 
@@ -140,19 +161,6 @@ let unack_msg t msg_id =
          WHERE msg_id = $msg_id)" >>
     PGSQL(dbh) "DELETE FROM mq_server_ack_msgs WHERE msg_id = $msg_id"
   end
-
-let get_queue_msgs t queue maxmsgs =
-  let maxmsgs = Int64.of_int maxmsgs in
-  lwt msgs =
-    WithDB begin
-      PGSQL(dbh)
-          "SELECT msg_id, destination, timestamp, priority, ack_timeout, body
-             FROM mq_server_msgs
-            WHERE destination = $queue
-         ORDER BY priority, timestamp
-            LIMIT $maxmsgs"
-    end
-  in return (List.map msg_of_tuple msgs)
 
 let count_queue_msgs t queue =
   WithDB(PGSQL(dbh) "SELECT COUNT(*) FROM mq_server_msgs WHERE destination = $queue")

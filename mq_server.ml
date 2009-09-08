@@ -18,7 +18,7 @@ sig
   val get_ack_pending_msg : t -> string -> Mq_types.message option Lwt.t
   val ack_msg : t -> string -> unit Lwt.t
   val unack_msg : t -> string -> unit Lwt.t
-  val get_queue_msgs : t -> string -> int -> Mq_types.message list Lwt.t
+  val get_msg_for_delivery : t -> string -> Mq_types.message option Lwt.t
   val count_queue_msgs : t -> string -> Int64.t Lwt.t
   val crash_recovery : t -> unit Lwt.t
 end
@@ -204,32 +204,34 @@ let rec send_to_recipient ~kind broker listeners conn subs msg =
         Queue.transfer conn.conn_blocked_subs q;
         Queue.iter
           (fun (listeners, subs) ->
-             ignore_result (send_saved_messages ~max_msgs:1 broker listeners conn subs))
+             ignore_result (send_saved_messages broker listeners conn subs))
           q;
         (* then, try to send older messages for the subscription whose message
          * we just ACKed *)
         send_saved_messages broker listeners conn subs
     end
 
-and send_saved_messages ?(max_msgs = max_int) broker listeners conn subs =
+and send_saved_messages broker listeners conn subs =
 
   let do_send msg =
     let msg_id = msg.msg_id in
     if not (is_subs_blocked (conn, subs)) then
       try_lwt
-        send_to_recipient ~kind:Saved broker listeners conn subs msg
-      with Lwt_unix.Timeout | Lwt.Canceled ->
+        send_to_recipient ~kind:Ack_pending broker listeners conn subs msg
+      with _ ->
         if broker.b_debug then
           eprintf "Timeout/Canceled on old message %S.\n%!" msg_id;
         enqueue_after_timeout broker msg_id
     else return () in
 
-  let wanted = min max_msgs (subs_wanted_msgs (conn, subs)) in
-  lwt msgs = P.get_queue_msgs broker.b_msg_store subs.qs_name wanted in
-    if broker.b_debug then
-      eprintf "Sending old messages: wanted %d, got %d.\n%!"
-        wanted (List.length msgs);
-    Lwt_util.iter do_send msgs
+  let rec loop () =
+    if subs_wanted_msgs (conn, subs) <= 0 then return ()
+    else
+      P.get_msg_for_delivery broker.b_msg_store subs.qs_name >>= function
+          None -> return ()
+        | Some msg -> ignore_result (do_send msg);
+                      loop ()
+  in loop ()
 
 and enqueue_after_timeout broker msg_id =
   P.get_ack_pending_msg broker.b_msg_store msg_id >>= function
@@ -484,7 +486,7 @@ let establish_connection broker fd addr =
                 } >>
               handle_connection broker conn
             with
-              | End_of_file | Sys_error _ | Unix.Unix_error _ ->
+              | Lwt_io.Channel_closed _ | End_of_file | Sys_error _ | Unix.Unix_error _ ->
                 terminate_connection broker conn
               | e ->
                   if broker.b_debug then begin
