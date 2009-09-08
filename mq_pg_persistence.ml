@@ -146,6 +146,12 @@ let get_queue_msgs t queue maxmsgs =
     end
   in return (List.map msg_of_tuple msgs)
 
+let count_queue_msgs t queue =
+  WithDB(PGSQL(dbh) "SELECT COUNT(*) FROM mq_server_msgs WHERE destination = $queue")
+    >>= function
+        Some count :: _ -> return count
+      | _ -> return 0L
+
 let crash_recovery t =
   WithDB begin
     if t.debug then eprintf "Recovering from crash...\n%!";

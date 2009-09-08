@@ -12,6 +12,7 @@ sig
   val ack_msg : t -> string -> unit Lwt.t
   val unack_msg : t -> string -> unit Lwt.t
   val get_queue_msgs : t -> string -> int -> Mq_types.message list Lwt.t
+  val count_queue_msgs : t -> string -> Int64.t Lwt.t
   val crash_recovery : t -> unit Lwt.t
 end
 
