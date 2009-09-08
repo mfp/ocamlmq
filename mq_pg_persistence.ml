@@ -18,7 +18,11 @@ let connect
       ?(debug = false) ?(max_conns = 1) () =
   let create_conn () = PGOCaml.connect ?host ?port ?database ?unix_domain_socket_dir
                          ?user ?password () in
-  return { dbconns = Lwt_pool.create max_conns create_conn; debug = debug }
+  let pool = Lwt_pool.create max_conns create_conn in
+    (* try to connect so we raise the exception as early as possible if
+     * something's wrong *)
+  Lwt_pool.use pool (fun _ -> return ()) >>
+  return { dbconns = pool; debug = debug }
 
 let msg_of_tuple (msg_id, dst, timestamp, priority, ack_timeout, body) =
   {

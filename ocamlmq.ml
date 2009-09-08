@@ -43,19 +43,26 @@ let () =
     usage_message;
   let addr = Unix.ADDR_INET (Unix.inet_addr_any, !port) in
     Lwt_unix.run begin
-      lwt msg_store = Mq_pg_persistence.connect
-                        ?host:!db_host
-                        ?port:!db_port
-                        ?database:!db_database
-                        ?unix_domain_socket_dir:!db_unix_sock_dir
-                        ?user:!db_user
-                        ?password:!db_password
-                        ~debug:!debug
-                        () in
-      (if !initdb then Mq_pg_persistence.initialize msg_store
-       else return ()) >>
-      lwt broker = SERVER.make_broker msg_store addr in
-        SERVER.server_loop ~debug:!debug broker
+      lwt msg_store =
+        try_lwt
+          Mq_pg_persistence.connect
+            ?host:!db_host
+            ?port:!db_port
+            ?database:!db_database
+            ?unix_domain_socket_dir:!db_unix_sock_dir
+            ?user:!db_user
+            ?password:!db_password
+            ~debug:!debug
+            ()
+        with _ -> (* counldn't connect to DB *)
+          eprintf "Could not connect to DB, use the -db* options.\n%!";
+          exit 1
+      in
+        if !debug then eprintf "Connected to database.\n%!";
+        (if !initdb then Mq_pg_persistence.initialize msg_store
+         else return ()) >>
+        lwt broker = SERVER.make_broker msg_store addr in
+          SERVER.server_loop ~debug:!debug broker
     end
 
 
