@@ -1,4 +1,5 @@
 open Printf
+open Lwt
 
 let set_some_string r = Arg.String (fun s -> r := Some s)
 let set_some_int r = Arg.Int (fun n -> r := Some n)
@@ -11,6 +12,7 @@ let db_password = ref None
 let db_unix_sock_dir = ref None
 let port = ref 44444
 let debug = ref false
+let initdb = ref false
 
 let params =
   Arg.align
@@ -22,6 +24,7 @@ let params =
       "-dbuser", set_some_string db_user, "USER Database user.";
       "-dbpassword", set_some_string db_password, "PASSWORD Database password.";
       "-port", Arg.Set_int port, "PORT Port to listen at.";
+      "-initdb", Arg.Set initdb, " Initialize the database (create required tables).";
       "-debug", Arg.Set debug, " Write debug info to stderr.";
     ]
 
@@ -49,7 +52,9 @@ let () =
                         ?password:!db_password
                         ~debug:!debug
                         () in
-      lwt broker = SERVER.make_broker msg_store addr in 
+      (if !initdb then Mq_pg_persistence.initialize msg_store
+       else return ()) >>
+      lwt broker = SERVER.make_broker msg_store addr in
         SERVER.server_loop ~debug:!debug broker
     end
 
