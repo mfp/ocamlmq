@@ -59,8 +59,10 @@ let () =
           exit 1
       in
         if !debug then eprintf "Connected to database.\n%!";
-        (if !initdb then Mq_pg_persistence.initialize msg_store
-         else return ()) >>
+        (if !initdb then begin
+           eprintf "Initializing database.\n%!";
+           Mq_pg_persistence.initialize msg_store
+         end else return ()) >>
         lwt broker = SERVER.make_broker msg_store addr in
           SERVER.server_loop ~debug:!debug broker
     end
