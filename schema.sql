@@ -1,5 +1,5 @@
 
-CREATE TABLE mq_server_msgs(
+CREATE TABLE ocamlmq_msgs(
     id SERIAL NOT NULL PRIMARY KEY,
     msg_id VARCHAR(255) NOT NULL UNIQUE,
     priority INT NOT NULL,
@@ -9,9 +9,9 @@ CREATE TABLE mq_server_msgs(
     body BYTEA NOT NULL
 );
 
-CREATE TABLE mq_server_ack_msgs(LIKE mq_server_msgs INCLUDING DEFAULTS);
+CREATE TABLE ocamlmq_pending_acks(
+    msg_id VARCHAR(255) NOT NULL PRIMARY KEY REFERENCES ocamlmq_msgs(msg_id)
+);
 
-CREATE INDEX mq_server_msgs_destination_priority_timestamp ON mq_server_msgs
+CREATE INDEX ocamlmq_msgs_destination_priority_timestamp ON ocamlmq_msgs
        USING BTREE(destination, priority, timestamp);
-
-CREATE UNIQUE INDEX mq_server_ack_msgs_msg_id ON mq_server_ack_msgs USING BTREE(msg_id);

@@ -69,124 +69,79 @@ DEFINE WithDB_trans(x) =
          PGOCaml.commit dbh >> return y
        with e -> PGOCaml.rollback dbh >> fail e)
 
-let save_msg t msg = match msg.msg_destination with
-    Topic _ -> return ()
-  | Queue queue ->
-      let body = msg.msg_body in
-      let time = CalendarLib.Calendar.from_unixfloat msg.msg_timestamp in
-      let msg_id = msg.msg_id in
-      let priority = Int32.of_int msg.msg_priority in
-      let ack_timeout = msg.msg_ack_timeout in
-        if t.debug then eprintf "Saving message %S.\n%!" msg_id;
-        WithDB begin
-          PGSQL(dbh)
-           "INSERT INTO mq_server_msgs(msg_id, priority, destination,
-                                       timestamp, ack_timeout, body)
-                   VALUES ($msg_id, $priority, $queue, $time, $ack_timeout, $body)"
-        end
-
-let get_ack_pending_msg t msg_id =
-  WithDB begin
-    PGSQL(dbh)
-       "SELECT priority, destination, timestamp, ack_timeout, body
-          FROM mq_server_ack_msgs
-         WHERE msg_id = $msg_id"
-  end
-  >>= function
-    | (priority, destination, timestamp, ack_timeout, body) :: _ ->
-        return
-          (Some { msg_id = msg_id;
-                  msg_priority = Int32.to_int priority;
-                  msg_destination = Queue destination;
-                  msg_timestamp = CalendarLib.Calendar.to_unixfloat timestamp;
-                  msg_ack_timeout = ack_timeout;
-                  msg_body = body })
-    | [] -> return None
-
-let register_ack_pending_new_msg t msg =
+let do_save t msg =
   let body = msg.msg_body in
   let time = CalendarLib.Calendar.from_unixfloat msg.msg_timestamp in
   let msg_id = msg.msg_id in
   let priority = Int32.of_int msg.msg_priority in
-  let ack_timeout = msg.msg_ack_timeout in
   let queue = destination_name msg.msg_destination in
-  if t.debug then eprintf "Saving non-ACKed message %S.\n%!" msg_id;
+  let ack_timeout = msg.msg_ack_timeout in
+    if t.debug then eprintf "Saving message %S.\n%!" msg_id;
+    WithDB begin
+      PGSQL(dbh)
+       "INSERT INTO ocamlmq_msgs(msg_id, priority, destination,
+                                 timestamp, ack_timeout, body)
+               VALUES ($msg_id, $priority, $queue, $time, $ack_timeout, $body)"
+    end
+
+let save_msg t msg = match msg.msg_destination with
+    Topic _ -> return ()
+  | Queue queue -> do_save t msg
+
+let get_ack_pending_msg t msg_id =
+  WithDB begin
+    PGSQL(dbh)
+       "SELECT msg.msg_id, destination, timestamp, priority, ack_timeout, body
+          FROM ocamlmq_msgs as msg, ocamlmq_pending_acks as ack
+         WHERE msg.msg_id = $msg_id AND ack.msg_id = $msg_id"
+  end
+  >>= function
+    | tuple :: _ -> return (Some (msg_of_tuple tuple))
+    | [] -> return None
+
+let register_ack_pending_new_msg t msg =
   WithDB_trans begin
-    begin
-      try_lwt
-        PGSQL(dbh)
-          "INSERT INTO mq_server_ack_msgs(msg_id, priority, destination,
-                                          timestamp, ack_timeout, body)
-           VALUES ($msg_id, $priority, $queue, $time, $ack_timeout, $body)"
-      with PGOCaml.PostgreSQL_Error (s, _) ->
-        print_endline "GOT PostgreSQL_Error";
-        print_endline s;
-        return ()
-      (* msg_id is not unique: happens if we had an ACK timeout and
-       * requeued the message *)
-      | e ->
-          print_endline "GOT EXCEPTION";
-          print_endline (Printexc.to_string e);
-          print_endline (Printexc.get_backtrace ());
-          return ()
-    end >>
-    PGSQL(dbh) "DELETE FROM mq_server_msgs WHERE msg_id = $msg_id"
+    do_save t msg >>
+    let msg_id = msg.msg_id in
+      PGSQL(dbh) "INSERT INTO ocamlmq_pending_acks(msg_id) VALUES($msg_id)"
   end
 
 let register_ack_pending_msg t msg_id =
-  WithDB_trans begin
-    lwt count =
-      PGSQL(dbh) "SELECT COUNT(*) FROM mq_server_msgs WHERE msg_id = $msg_id" in
-    PGSQL(dbh)
-      "INSERT INTO
-        mq_server_ack_msgs(msg_id, priority, destination, timestamp, ack_timeout, body)
-        (SELECT msg_id, priority, destination, timestamp, ack_timeout, body
-         FROM mq_server_msgs
-         WHERE msg_id = $msg_id)" >>
-    PGSQL(dbh) "DELETE FROM mq_server_msgs WHERE msg_id = $msg_id" >>
-   (* if count was 0 / undefined, we didn't actually instead it in the ACK set *)
-    match count with
-        Some c :: _ -> return (c = 1L)
-      | _ -> return false
-  end
+  try
+    WithDB(PGSQL(dbh) "INSERT INTO ocamlmq_pending_acks(msg_id) VALUES($msg_id)") >>
+    return true
+  with _ -> return false
 
 let get_msg_for_delivery t queue =
   WithDB_trans begin
     lwt tuples =
       PGSQL(dbh)
         "SELECT msg_id, destination, timestamp, priority, ack_timeout, body
-           FROM mq_server_msgs
+           FROM ocamlmq_msgs as msg
           WHERE destination = $queue
+                AND NOT EXISTS(SELECT 1
+                               FROM ocamlmq_pending_acks
+                               WHERE msg_id = msg.msg_id)
        ORDER BY priority, timestamp
           LIMIT 1"
     in match tuples with
-        (id, dest, time, prio, timeout, body) as tuple :: _ ->
+        tuple :: _ ->
           let msg = msg_of_tuple tuple in
+          let msg_id = msg.msg_id in
             PGSQL(dbh)
-              "INSERT INTO mq_server_ack_msgs(msg_id, destination, timestamp,
-                                              priority, ack_timeout, body)
-               VALUES($id, $dest, $time, $prio, $timeout, $body)" >>
-            PGSQL(dbh) "DELETE FROM mq_server_msgs WHERE msg_id = $id" >>
+              "INSERT INTO ocamlmq_pending_acks(msg_id) VALUES ($msg_id)" >>
             return (Some msg)
       | [] -> return None
   end
 
 let ack_msg t msg_id =
-  WithDB(PGSQL(dbh) "DELETE FROM mq_server_ack_msgs WHERE msg_id = $msg_id")
+  WithDB(PGSQL(dbh) "DELETE FROM ocamlmq_pending_acks WHERE msg_id = $msg_id")
 
 let unack_msg t msg_id =
-  WithDB_trans begin
-    PGSQL(dbh)
-      "INSERT INTO
-        mq_server_msgs(msg_id, priority, destination, timestamp, ack_timeout, body)
-        (SELECT msg_id, priority, destination, timestamp, ack_timeout, body
-         FROM mq_server_ack_msgs
-         WHERE msg_id = $msg_id)" >>
-    PGSQL(dbh) "DELETE FROM mq_server_ack_msgs WHERE msg_id = $msg_id"
-  end
+  WithDB(PGSQL(dbh) "DELETE FROM ocamlmq_pending_acks WHERE msg_id = $msg_id")
 
 let count_queue_msgs t queue =
-  WithDB(PGSQL(dbh) "SELECT COUNT(*) FROM mq_server_msgs WHERE destination = $queue")
+  WithDB(PGSQL(dbh) "SELECT COUNT(*) FROM ocamlmq_msgs WHERE destination = $queue")
     >>= function
         Some count :: _ -> return count
       | _ -> return 0L
@@ -194,17 +149,11 @@ let count_queue_msgs t queue =
 let crash_recovery t =
   WithDB_trans begin
     if t.debug then eprintf "Recovering from crash...\n%!";
-    PGOCaml.begin_work dbh >>
-    try_lwt
-      lwt n = PGSQL(dbh) "SELECT COUNT(*) FROM mq_server_ack_msgs" in
-      PGSQL(dbh) "INSERT INTO mq_server_msgs (SELECT * from mq_server_ack_msgs)" >>
-      PGSQL(dbh) "DELETE FROM mq_server_ack_msgs" >>
-      ((match n with
-           Some nmsgs :: _ -> eprintf "Recovered %Ld messages.\n%!" nmsgs;
-         | _ -> eprintf "No messages found.\n%!");
-      PGOCaml.commit dbh)
-    with _ ->
-      eprintf "Couldn't recover messages.\n%!";
-      PGOCaml.rollback dbh >>
-      fail (Failure "Couldn't recover non-ACKed messages from earlier crash.")
+    PGSQL(dbh) "SELECT COUNT(*) FROM ocamlmq_pending_acks" >>= function
+        Some n :: _ -> eprintf "Recovering %Ld ACK-pending messages: %!" n;
+                       lwt () = PGSQL(dbh) "DELETE FROM ocamlmq_pending_acks" in
+                       eprintf "DONE\n%!";
+                       return ()
+      | _ -> eprintf "No ACK-pending messages found.\n%!";
+             return ()
   end
