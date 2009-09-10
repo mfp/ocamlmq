@@ -102,10 +102,13 @@ let send_to_topic broker msg =
   Lwt_unix.yield () >>
   try
     let s = Hashtbl.find broker.b_topics (destination_name msg.msg_destination) in
-      Lwt.ignore_result
-        (Lwt_util.iter
-           (fun conn -> STOMP.send_message ~eol:broker.b_frame_eol conn.conn_och msg)
-           (CONNS.elements !s));
+      List.iter
+        (fun conn ->
+           ignore_result
+             (try_lwt
+                STOMP.send_message ~eol:broker.b_frame_eol conn.conn_och msg
+              with _ -> return ()))
+        (CONNS.elements !s);
       return ()
   with Not_found -> return ()
 
