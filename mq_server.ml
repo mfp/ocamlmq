@@ -95,6 +95,37 @@ type broker = {
   b_debug : bool;
 }
 
+let terminate_connection broker conn =
+  let wakeners =
+    Hashtbl.fold (fun _ u l -> u :: l) conn.conn_pending_acks [] in
+
+  if broker.b_debug then
+    eprintf "Connection %d terminated with %d pending ACKs\n%!"
+      conn.conn_id (List.length wakeners);
+
+  (* remove from connection set and subscription lists *)
+  broker.b_connections <- CONNS.remove conn broker.b_connections;
+  Hashtbl.iter
+    (fun k _ ->
+       try
+         let s = Hashtbl.find broker.b_topics k in
+           s := CONNS.remove conn !s
+       with Not_found -> ())
+    conn.conn_topics;
+  Hashtbl.iter
+    (fun k _ ->
+       let rm s = SUBS.remove (conn, dummy_subscription) s in
+       try
+         let ls = Hashtbl.find broker.b_queues k in
+           ls.l_ready <- rm ls.l_ready;
+           ls.l_blocked <- rm ls.l_blocked;
+       with Not_found -> ())
+    conn.conn_queues;
+  (* cancel all the waiters: they will re-queue the
+   * corresponding messages *)
+  List.iter (fun w -> wakeup_exn w Lwt.Canceled) wakeners;
+  return ()
+
 let send_error broker conn fmt =
   STOMP.send_error ~eol:broker.b_frame_eol conn.conn_och fmt
 
@@ -217,19 +248,26 @@ let rec send_to_recipient ~kind broker listeners conn subs msg =
 
 and send_saved_messages broker listeners conn subs =
 
+  let go_on = ref true in
+
   let do_send msg =
     let msg_id = msg.msg_id in
     if not (is_subs_blocked (conn, subs)) then
       try_lwt
         send_to_recipient ~kind:Ack_pending broker listeners conn subs msg
-      with _ ->
-        if broker.b_debug then
-          eprintf "Timeout/Canceled on old message %S.\n%!" msg_id;
-        enqueue_after_timeout broker msg_id
+      with Lwt_unix.Timeout | Lwt.Canceled ->
+          if broker.b_debug then
+            eprintf "Timeout/Canceled on old message %S.\n%!" msg_id;
+          enqueue_after_timeout broker msg_id
+        | e ->
+            go_on := false;
+            terminate_connection broker conn >>
+            enqueue_after_timeout broker msg_id
     else return () in
 
   let rec loop () =
-    if subs_wanted_msgs (conn, subs) <= 0 then return ()
+    if not !go_on then return ()
+    else if subs_wanted_msgs (conn, subs) <= 0 then return ()
     else
       P.get_msg_for_delivery broker.b_msg_store subs.qs_name >>= function
           None -> return ()
@@ -430,37 +468,6 @@ let handle_connection broker conn =
     handle_frame broker conn frame >>
     loop ()
   in loop ()
-
-let terminate_connection broker conn =
-  let wakeners =
-    Hashtbl.fold (fun _ u l -> u :: l) conn.conn_pending_acks [] in
-
-  if broker.b_debug then
-    eprintf "Connection %d terminated with %d pending ACKs\n%!"
-      conn.conn_id (List.length wakeners);
-
-  (* remove from connection set and subscription lists *)
-  broker.b_connections <- CONNS.remove conn broker.b_connections;
-  Hashtbl.iter
-    (fun k _ ->
-       try
-         let s = Hashtbl.find broker.b_topics k in
-           s := CONNS.remove conn !s
-       with Not_found -> ())
-    conn.conn_topics;
-  Hashtbl.iter
-    (fun k _ ->
-       let rm s = SUBS.remove (conn, dummy_subscription) s in
-       try
-         let ls = Hashtbl.find broker.b_queues k in
-           ls.l_ready <- rm ls.l_ready;
-           ls.l_blocked <- rm ls.l_blocked;
-       with Not_found -> ())
-    conn.conn_queues;
-  (* cancel all the waiters: they will re-queue the
-   * corresponding messages *)
-  List.iter (fun w -> wakeup_exn w Lwt.Canceled) wakeners;
-  return ()
 
 let establish_connection broker fd addr =
   let ich = Lwt_io.of_fd Lwt_io.input fd in
