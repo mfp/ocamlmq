@@ -99,6 +99,7 @@ let send_error broker conn fmt =
   STOMP.send_error ~eol:broker.b_frame_eol conn.conn_och fmt
 
 let send_to_topic broker msg =
+  Lwt_unix.yield () >>
   try
     let s = Hashtbl.find broker.b_topics (destination_name msg.msg_destination) in
       Lwt.ignore_result
