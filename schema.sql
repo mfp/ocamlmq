@@ -10,7 +10,8 @@ CREATE TABLE ocamlmq_msgs(
 );
 
 CREATE TABLE ocamlmq_pending_acks(
-    msg_id VARCHAR(255) NOT NULL PRIMARY KEY REFERENCES ocamlmq_msgs(msg_id)
+    msg_id VARCHAR(255) NOT NULL PRIMARY KEY
+    REFERENCES ocamlmq_msgs(msg_id) ON DELETE CASCADE
 );
 
 CREATE INDEX ocamlmq_msgs_destination_priority_timestamp ON ocamlmq_msgs
