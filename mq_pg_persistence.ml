@@ -135,7 +135,7 @@ let get_msg_for_delivery t queue =
   end
 
 let ack_msg t msg_id =
-  WithDB(PGSQL(dbh) "DELETE FROM ocamlmq_pending_acks WHERE msg_id = $msg_id")
+  WithDB(PGSQL(dbh) "DELETE FROM ocamlmq_msgs WHERE msg_id = $msg_id")
 
 let unack_msg t msg_id =
   WithDB(PGSQL(dbh) "DELETE FROM ocamlmq_pending_acks WHERE msg_id = $msg_id")
