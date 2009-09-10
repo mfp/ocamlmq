@@ -394,7 +394,7 @@ let ignore_command broker conn frame = return ()
 
 let command_handlers = Hashtbl.create 13
 let register_command (name, f) =
-  Hashtbl.add command_handlers (String.uppercase name) f
+  Hashtbl.add command_handlers name f
 
 let with_receipt f broker conn frame =
   f broker conn frame >>
@@ -415,7 +415,7 @@ let () =
 
 let handle_frame broker conn frame =
   try
-    Hashtbl.find command_handlers (String.uppercase frame.STOMP.fr_command)
+    Hashtbl.find command_handlers frame.STOMP.fr_command
       broker conn frame
   with Not_found ->
     send_error broker conn "Unknown command %S." frame.STOMP.fr_command
@@ -462,7 +462,7 @@ let establish_connection broker fd addr =
   let ich = Lwt_io.of_fd Lwt_io.input fd in
   let och = Lwt_io.of_fd Lwt_io.output fd in
   lwt frame = STOMP.read_stomp_frame ~eol:broker.b_frame_eol ich in
-    match String.uppercase frame.STOMP.fr_command with
+    match frame.STOMP.fr_command with
         "CONNECT" ->
           let conn =
             {
