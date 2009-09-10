@@ -270,7 +270,8 @@ let new_id prefix =
   let cnt = ref 0 in
     fun () ->
       incr cnt;
-      sprintf "%s-%f-%d" prefix (Unix.gettimeofday ()) !cnt
+      String.concat "-"
+        [prefix; string_of_float (Unix.gettimeofday ()); string_of_int !cnt]
 
 let new_msg_id = new_id "msg"
 
@@ -356,7 +357,7 @@ let cmd_send broker conn frame =
     let destination = STOMP.get_destination frame in
     let msg =
       {
-        msg_id = sprintf "conn-%d:%s" conn.conn_id (new_msg_id ());
+        msg_id = String.concat "-" ["conn"; string_of_int conn.conn_id; new_msg_id ()];
         msg_destination = destination;
         msg_priority = 0;
         msg_timestamp = Unix.gettimeofday ();
