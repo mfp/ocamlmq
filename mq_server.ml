@@ -47,6 +47,7 @@ type connection = {
   mutable conn_pending_acks : (string, unit Lwt.u) Hashtbl.t;
   conn_queues : (string, subscription) Hashtbl.t;
   conn_topics : (string, subscription) Hashtbl.t;
+  mutable conn_closed : bool;
 }
 
 
@@ -84,6 +85,8 @@ let terminate_connection broker conn =
   let wakeners =
     Hashtbl.fold (fun _ u l -> u :: l) conn.conn_pending_acks [] in
 
+  conn.conn_closed <- true;
+
   if broker.b_debug then
     eprintf "Connection %d terminated with %d pending ACKs\n%!"
       conn.conn_id (List.length wakeners);
@@ -106,8 +109,7 @@ let terminate_connection broker conn =
            ls.l_blocked <- rm ls.l_blocked;
        with Not_found -> ())
     conn.conn_queues;
-  (* cancel all the waiters: they will re-queue the
-   * corresponding messages *)
+  (* cancel all the waiters: they will re-queue the corresponding messages *)
   List.iter (fun w -> wakeup_exn w Lwt.Canceled) wakeners;
   return ()
 
@@ -133,7 +135,8 @@ let subs_wanted_msgs (conn, subs) =
 let is_subs_blocked_locally subs =
   subs.qs_prefetch > 0 && subs.qs_pending_acks >= subs.qs_prefetch
 
-let is_subs_blocked (conn, subs) = is_subs_blocked_locally subs
+let is_subs_blocked (conn, subs) =
+  conn.conn_closed || is_subs_blocked_locally subs
 
 let select_blocked_subs s = SUBS.filter is_subs_blocked s
 
@@ -165,6 +168,11 @@ let find_recipient broker name =
               | c -> Some (ls, c)
   with Not_found -> None
 
+let have_recipient broker name =
+  match find_recipient broker name with
+      Some _ -> true
+    | None -> false
+
 let rec send_to_recipient ~kind broker listeners conn subs msg =
   if broker.b_debug then
     eprintf "Sending %S to conn %d.\n%!" msg.msg_id conn.conn_id;
@@ -172,8 +180,11 @@ let rec send_to_recipient ~kind broker listeners conn subs msg =
   let msg_id = msg.msg_id in
     subs.qs_pending_acks <- subs.qs_pending_acks + 1;
     Hashtbl.replace conn.conn_pending_acks msg_id wakeup;
-    listeners.l_last_sent <- Some (conn, subs);
     if is_subs_blocked (conn, subs) then block_subscription listeners (conn, subs);
+    (* we check after doing block_subscription so that the next find_recipient
+     * won't get this connection *)
+    if conn.conn_closed then fail Lwt.Canceled else let () = () in
+    listeners.l_last_sent <- Some (conn, subs);
 
     (* if kind is Saved, the msg is believed not to be in the ACK-pending set;
      * if it actually is, this means it was already sent to some other conn,
@@ -207,33 +218,41 @@ let rec send_to_recipient ~kind broker listeners conn subs msg =
     end
 
 and send_saved_messages broker queue =
-  let rec loop () =
+  let rec loop ?(only_once = false) () =
+    if not (have_recipient broker queue) then return () else
     P.get_msg_for_delivery broker.b_msg_store queue >>= function
         None -> return ()
       | Some msg ->
           let msg_id = msg.msg_id in
           match find_recipient broker queue with
-              None -> return ()
+              None ->
+                (* there was no recipient after all (it was closed or blocked
+                 * in the meantime, so unack the msg, and try to deliver
+                 * again in a while *)
+                P.unack_msg broker.b_msg_store msg_id >> Lwt_unix.sleep 5. >>
+                loop ~only_once:true ()
             | Some (listeners, (conn, subs)) ->
                 ignore_result
-                  ~exn_handler:(handle_send_msg_exn broker conn msg_id)
+                  ~exn_handler:(handle_send_msg_exn broker conn ~queue ~msg_id)
                   (send_to_recipient ~kind:Ack_pending broker listeners conn subs)
                   msg;
-                loop ()
+                if only_once then return () else loop ()
   in loop ()
 
-and handle_send_msg_exn broker conn msg_id = function
+and handle_send_msg_exn broker ~queue conn ~msg_id = function
   | Lwt_unix.Timeout | Lwt.Canceled ->
       if broker.b_debug then
         eprintf "Timeout/Canceled on message %S.\n%!" msg_id;
-      enqueue_after_timeout broker msg_id
-  | _ -> terminate_connection broker conn >> enqueue_after_timeout broker msg_id
+      enqueue_after_timeout broker ~queue ~msg_id
+  | _ -> terminate_connection broker conn >>
+         enqueue_after_timeout broker ~queue ~msg_id
 
-and enqueue_after_timeout broker msg_id =
+and enqueue_after_timeout broker ~queue ~msg_id =
+  if not (have_recipient broker queue) then
+    P.unack_msg broker.b_msg_store msg_id else
   P.get_ack_pending_msg broker.b_msg_store msg_id >>= function
       None -> return ()
     | Some msg ->
-        let queue = destination_name msg.msg_destination in
         let msg_id = msg.msg_id in
         match find_recipient broker queue with
           | None -> begin (* move to main table *)
@@ -248,16 +267,17 @@ and enqueue_after_timeout broker msg_id =
               with Lwt_unix.Timeout | Lwt.Canceled ->
                 if broker.b_debug then
                   eprintf "Trying to enqueue unACKed message %S again.\n%!" msg_id;
-                enqueue_after_timeout broker msg_id
+                enqueue_after_timeout broker ~queue ~msg_id
 
 let rec send_to_queue broker msg =
-  match find_recipient broker (destination_name msg.msg_destination) with
+  let queue = destination_name msg.msg_destination in
+  match find_recipient broker queue with
       None -> return ()
     | Some (listeners, (conn, subs)) ->
         let msg_id = msg.msg_id in
           try_lwt
             send_to_recipient ~kind:Saved broker listeners conn subs msg
-          with e -> handle_send_msg_exn broker conn msg_id e
+          with e -> handle_send_msg_exn broker conn ~queue ~msg_id e
 
 let new_id prefix =
   let cnt = ref 0 in
@@ -432,6 +452,7 @@ let establish_connection broker fd addr =
               conn_pending_acks = Hashtbl.create 13;
               conn_queues = Hashtbl.create 13;
               conn_topics = Hashtbl.create 13;
+              conn_closed = false;
             }
           in begin
             try_lwt
@@ -444,7 +465,8 @@ let establish_connection broker fd addr =
               handle_connection broker conn
             with
               | Lwt_io.Channel_closed _ | End_of_file | Sys_error _ | Unix.Unix_error _ ->
-                terminate_connection broker conn
+                  (* give it time to process the last few acks *)
+                  Lwt_unix.sleep 2. >> terminate_connection broker conn
               | e ->
                   if broker.b_debug then begin
                       eprintf "GOT EXCEPTION for conn %d: %s\n%!"
