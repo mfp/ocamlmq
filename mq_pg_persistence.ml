@@ -159,7 +159,8 @@ let crash_recovery t =
     PGSQL(dbh) "SELECT COUNT(*) FROM ocamlmq_msgs WHERE ack_pending = true" >>= function
         Some n :: _ ->
           eprintf "Recovering %Ld ACK-pending messages: %!" n;
-          lwt () = PGSQL(dbh) "UPDATE ocamlmq_msgs SET ack_pending = false" in
+          lwt () = PGSQL(dbh) "UPDATE ocamlmq_msgs SET ack_pending = false
+                                WHERE ack_pending = true" in
           eprintf "DONE\n%!";
           return ()
       | _ -> eprintf "No ACK-pending messages found.\n%!";
