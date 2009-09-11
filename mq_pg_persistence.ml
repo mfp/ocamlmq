@@ -145,7 +145,7 @@ let ack_msg t msg_id =
   WithDB(PGSQL(dbh) "DELETE FROM ocamlmq_msgs WHERE msg_id = $msg_id")
 
 let unack_msg t msg_id =
-  WithDB(PGSQL(dbh) "UPDATE ocamlmq_msgs SET ack_pending = true WHERE msg_id = $msg_id")
+  WithDB(PGSQL(dbh) "UPDATE ocamlmq_msgs SET ack_pending = false WHERE msg_id = $msg_id")
 
 let count_queue_msgs t queue =
   WithDB(PGSQL(dbh) "SELECT COUNT(*) FROM ocamlmq_msgs WHERE destination = $queue")
