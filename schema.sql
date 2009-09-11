@@ -1,7 +1,7 @@
 
 CREATE TABLE ocamlmq_msgs(
-    id SERIAL NOT NULL PRIMARY KEY,
-    msg_id VARCHAR(255) NOT NULL UNIQUE,
+    msg_id VARCHAR(255) NOT NULL PRIMARY KEY,
+    ack_pending BOOL NOT NULL DEFAULT false,
     priority INT NOT NULL,
     destination VARCHAR(255) NOT NULL,
     timestamp TIMESTAMP WITHOUT TIME ZONE NOT NULL,
@@ -9,10 +9,5 @@ CREATE TABLE ocamlmq_msgs(
     body BYTEA NOT NULL
 );
 
-CREATE TABLE ocamlmq_pending_acks(
-    msg_id VARCHAR(255) NOT NULL PRIMARY KEY
-    REFERENCES ocamlmq_msgs(msg_id) ON DELETE CASCADE
-);
-
-CREATE INDEX ocamlmq_msgs_destination_priority_timestamp ON ocamlmq_msgs
-       USING BTREE(destination, priority, timestamp);
+CREATE INDEX ocamlmq_msgs_ack_pending_destination_priority_timestamp ON ocamlmq_msgs
+       USING BTREE(ack_pending, destination, priority, timestamp);

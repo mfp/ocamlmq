@@ -69,7 +69,7 @@ DEFINE WithDB_trans(x) =
          PGOCaml.commit dbh >> return y
        with e -> PGOCaml.rollback dbh >> fail e)
 
-let do_save t msg =
+let do_save t ?(ack_pending = false) msg =
   let body = msg.msg_body in
   let time = CalendarLib.Calendar.from_unixfloat msg.msg_timestamp in
   let msg_id = msg.msg_id in
@@ -79,9 +79,10 @@ let do_save t msg =
     if t.debug then eprintf "Saving message %S.\n%!" msg_id;
     WithDB begin
       PGSQL(dbh)
-       "INSERT INTO ocamlmq_msgs(msg_id, priority, destination,
+       "INSERT INTO ocamlmq_msgs(msg_id, ack_pending, priority, destination,
                                  timestamp, ack_timeout, body)
-               VALUES ($msg_id, $priority, $queue, $time, $ack_timeout, $body)"
+               VALUES ($msg_id, $ack_pending, $priority, $queue, $time,
+                       $ack_timeout, $body)"
     end
 
 let save_msg t msg = match msg.msg_destination with
@@ -91,60 +92,60 @@ let save_msg t msg = match msg.msg_destination with
 let get_ack_pending_msg t msg_id =
   WithDB begin
     PGSQL(dbh)
-       "SELECT msg.msg_id, destination, timestamp, priority, ack_timeout, body
-          FROM ocamlmq_msgs as msg, ocamlmq_pending_acks as ack
-         WHERE msg.msg_id = $msg_id AND ack.msg_id = $msg_id"
+       "SELECT msg_id, destination, timestamp, priority, ack_timeout, body
+          FROM ocamlmq_msgs as msg
+         WHERE msg_id = $msg_id AND ack_pending = true"
   end
   >>= function
     | tuple :: _ -> return (Some (msg_of_tuple tuple))
     | [] -> return None
 
 let register_ack_pending_new_msg t msg =
-  WithDB_trans begin
-    do_save t msg >>
-    let msg_id = msg.msg_id in
-      PGSQL(dbh) "INSERT INTO ocamlmq_pending_acks(msg_id) VALUES($msg_id)"
-  end
+  WithDB(do_save t ~ack_pending:true msg)
 
 let register_ack_pending_msg t msg_id =
   try_lwt
-    WithDB(PGSQL(dbh) "INSERT INTO ocamlmq_pending_acks(msg_id) VALUES($msg_id)") >>
-    return true
+    WithDB_trans begin
+      PGSQL(dbh)
+        "SELECT 1 FROM ocamlmq_msgs
+          WHERE msg_id = $msg_id AND ack_pending = false
+          FOR UPDATE" >>= function
+        [] -> return false
+      | _ ->
+          PGSQL(dbh)
+            "UPDATE ocamlmq_msgs SET ack_pending = true WHERE msg_id = $msg_id" >>
+          return true
+    end
   with _ -> return false
 
 let rec get_msg_for_delivery t queue =
-  WithDB_trans begin
-    lwt tuples =
-      PGSQL(dbh)
-        "SELECT msg_id, destination, timestamp, priority, ack_timeout, body
-           FROM ocamlmq_msgs as msg
-          WHERE destination = $queue
-                AND NOT EXISTS(SELECT 1
-                               FROM ocamlmq_pending_acks
-                               WHERE msg_id = msg.msg_id)
-       ORDER BY priority, timestamp
-          LIMIT 1"
-    in match tuples with
-        tuple :: _ ->
-          let msg = msg_of_tuple tuple in
-          let msg_id = msg.msg_id in
-            begin try_lwt
+  try_lwt
+    WithDB_trans begin
+      lwt tuples =
+        PGSQL(dbh)
+          "SELECT msg_id, destination, timestamp, priority, ack_timeout, body
+             FROM ocamlmq_msgs as msg
+            WHERE destination = $queue AND ack_pending = false
+         ORDER BY priority, timestamp
+            LIMIT 1
+       FOR UPDATE"
+      in match tuples with
+          tuple :: _ ->
+            let msg = msg_of_tuple tuple in
+            let msg_id = msg.msg_id in
               PGSQL(dbh)
-                "INSERT INTO ocamlmq_pending_acks(msg_id) VALUES ($msg_id)" >>
+                "UPDATE ocamlmq_msgs SET ack_pending = true
+                  WHERE msg_id = $msg_id" >>
               return (Some msg)
-            with PGOCaml.PostgreSQL_Error _ ->
-              (* FIXME: violates unique constraint, even though we're in a
-               * transaction. Wrong isolation level? *)
-              get_msg_for_delivery t queue
-            end
-      | [] -> return None
-  end
+        | [] -> return None
+    end
+  with _ -> return None (* FIXME: is this OK? *)
 
 let ack_msg t msg_id =
   WithDB(PGSQL(dbh) "DELETE FROM ocamlmq_msgs WHERE msg_id = $msg_id")
 
 let unack_msg t msg_id =
-  WithDB(PGSQL(dbh) "DELETE FROM ocamlmq_pending_acks WHERE msg_id = $msg_id")
+  WithDB(PGSQL(dbh) "UPDATE ocamlmq_msgs SET ack_pending = true WHERE msg_id = $msg_id")
 
 let count_queue_msgs t queue =
   WithDB(PGSQL(dbh) "SELECT COUNT(*) FROM ocamlmq_msgs WHERE destination = $queue")
@@ -155,11 +156,12 @@ let count_queue_msgs t queue =
 let crash_recovery t =
   WithDB_trans begin
     if t.debug then eprintf "Recovering from crash...\n%!";
-    PGSQL(dbh) "SELECT COUNT(*) FROM ocamlmq_pending_acks" >>= function
-        Some n :: _ -> eprintf "Recovering %Ld ACK-pending messages: %!" n;
-                       lwt () = PGSQL(dbh) "DELETE FROM ocamlmq_pending_acks" in
-                       eprintf "DONE\n%!";
-                       return ()
+    PGSQL(dbh) "SELECT COUNT(*) FROM ocamlmq_msgs WHERE ack_pending = true" >>= function
+        Some n :: _ ->
+          eprintf "Recovering %Ld ACK-pending messages: %!" n;
+          lwt () = PGSQL(dbh) "UPDATE ocamlmq_msgs SET ack_pending = false" in
+          eprintf "DONE\n%!";
+          return ()
       | _ -> eprintf "No ACK-pending messages found.\n%!";
              return ()
   end
