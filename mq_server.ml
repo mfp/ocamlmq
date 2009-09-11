@@ -202,12 +202,11 @@ let rec send_to_recipient ~kind broker listeners conn subs msg =
       P.ack_msg broker.b_msg_store msg_id >>
       (* try to send older messages for the subscription whose message
        * we just ACKed *)
-      send_saved_messages broker listeners conn subs
+      (ignore_result (send_saved_messages broker listeners conn) subs;
+       return ())
     end
 
 and send_saved_messages broker listeners conn subs =
-
-  let go_on = ref true in
 
   let do_send msg =
     if not (is_subs_blocked (conn, subs)) then
@@ -215,27 +214,25 @@ and send_saved_messages broker listeners conn subs =
     else return () in
 
   let rec loop () =
-    if not !go_on then return ()
-    else if subs_wanted_msgs (conn, subs) <= 0 then return ()
+    if subs_wanted_msgs (conn, subs) <= 0 then return ()
     else
       P.get_msg_for_delivery broker.b_msg_store subs.qs_name >>= function
           None -> return ()
         | Some msg ->
-            ignore_result do_send msg
-              ~exn_handler:(handle_send_msg_exn ~f:(fun _ -> go_on := false)
-                              broker conn msg.msg_id);
-            loop ()
+            lwt must_continue =
+              try_lwt
+                do_send msg >> return true
+              with e -> handle_send_msg_exn broker conn msg.msg_id e >>
+                        return false
+            in if must_continue then loop () else return ()
   in loop ()
 
-and handle_send_msg_exn ?(f = fun _ -> ()) broker conn msg_id = function
+and handle_send_msg_exn broker conn msg_id = function
   | Lwt_unix.Timeout | Lwt.Canceled ->
       if broker.b_debug then
         eprintf "Timeout/Canceled on message %S.\n%!" msg_id;
       enqueue_after_timeout broker msg_id
-  | _ ->
-      f msg_id;
-      terminate_connection broker conn >>
-      enqueue_after_timeout broker msg_id
+  | _ -> terminate_connection broker conn >> enqueue_after_timeout broker msg_id
 
 and enqueue_after_timeout broker msg_id =
   P.get_ack_pending_msg broker.b_msg_store msg_id >>= function
