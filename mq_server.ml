@@ -202,30 +202,24 @@ let rec send_to_recipient ~kind broker listeners conn subs msg =
       P.ack_msg broker.b_msg_store msg_id >>
       (* try to send older messages for the subscription whose message
        * we just ACKed *)
-      (ignore_result (send_saved_messages broker listeners conn) subs;
+      (ignore_result (send_saved_messages broker) subs.qs_name;
        return ())
     end
 
-and send_saved_messages broker listeners conn subs =
-
-  let do_send msg =
-    if not (is_subs_blocked (conn, subs)) then
-      send_to_recipient ~kind:Ack_pending broker listeners conn subs msg
-    else return () in
-
-  let finished = ref false in
+and send_saved_messages broker queue =
   let rec loop () =
-    if subs_wanted_msgs (conn, subs) <= 0 then return ()
-    else
-      P.get_msg_for_delivery broker.b_msg_store subs.qs_name >>= function
-          None -> return ()
-        | Some msg ->
-            let msg_id = msg.msg_id in
-              ignore_result do_send msg
-                ~exn_handler:(fun e ->
-                                finished := true;
-                                handle_send_msg_exn broker conn msg_id e);
-              if !finished then return () else loop ()
+    P.get_msg_for_delivery broker.b_msg_store queue >>= function
+        None -> return ()
+      | Some msg ->
+          let msg_id = msg.msg_id in
+          match find_recipient broker queue with
+              None -> return ()
+            | Some (listeners, (conn, subs)) ->
+                ignore_result
+                  ~exn_handler:(handle_send_msg_exn broker conn msg_id)
+                  (send_to_recipient ~kind:Ack_pending broker listeners conn subs)
+                  msg;
+                loop ()
   in loop ()
 
 and handle_send_msg_exn broker conn msg_id = function
@@ -301,21 +295,18 @@ let cmd_subscribe broker conn frame =
         end
       | Queue name -> begin
           Hashtbl.replace conn.conn_queues name subscription;
-          let listeners =
+          begin
             try
               let ls = Hashtbl.find broker.b_queues name in
                 ls.l_ready <- SUBS.add (conn, subscription) ls.l_ready;
-                ls
             with Not_found ->
               let ls = { l_ready = SUBS.singleton (conn, subscription);
                          l_blocked = SUBS.empty;
                          l_last_sent = None }
-              in Hashtbl.add broker.b_queues name ls;
-                 ls
-          in ignore_result
-               (send_saved_messages broker listeners conn)
-               subscription;
-             return ()
+              in Hashtbl.add broker.b_queues name ls
+          end;
+          ignore_result (send_saved_messages broker) name;
+          return ()
         end
   with Not_found ->
     STOMP.send_error ~eol:broker.b_frame_eol conn.conn_och
