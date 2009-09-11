@@ -95,6 +95,9 @@ type broker = {
   b_debug : bool;
 }
 
+let ignore_result f x exn_handler =
+  ignore_result (try_lwt f x with e -> exn_handler e)
+
 let terminate_connection broker conn =
   let wakeners =
     Hashtbl.fold (fun _ u l -> u :: l) conn.conn_pending_acks [] in
@@ -136,9 +139,8 @@ let send_to_topic broker msg =
       List.iter
         (fun conn ->
            ignore_result
-             (try_lwt
-                STOMP.send_message ~eol:broker.b_frame_eol conn.conn_och msg
-              with _ -> return ()))
+             (STOMP.send_message ~eol:broker.b_frame_eol conn.conn_och) msg
+             (fun _ -> return ()) )
         (CONNS.elements !s);
       return ()
   with Not_found -> return ()
@@ -239,7 +241,9 @@ let rec send_to_recipient ~kind broker listeners conn subs msg =
         Queue.transfer conn.conn_blocked_subs q;
         Queue.iter
           (fun (listeners, subs) ->
-             ignore_result (send_saved_messages broker listeners conn subs))
+             ignore_result
+               (send_saved_messages broker listeners conn) subs
+               (fun _ -> return ()))
           q;
         (* then, try to send older messages for the subscription whose message
          * we just ACKed *)
@@ -251,18 +255,8 @@ and send_saved_messages broker listeners conn subs =
   let go_on = ref true in
 
   let do_send msg =
-    let msg_id = msg.msg_id in
     if not (is_subs_blocked (conn, subs)) then
-      try_lwt
-        send_to_recipient ~kind:Ack_pending broker listeners conn subs msg
-      with Lwt_unix.Timeout | Lwt.Canceled ->
-          if broker.b_debug then
-            eprintf "Timeout/Canceled on old message %S.\n%!" msg_id;
-          enqueue_after_timeout broker msg_id
-        | e ->
-            go_on := false;
-            terminate_connection broker conn >>
-            enqueue_after_timeout broker msg_id
+      send_to_recipient ~kind:Ack_pending broker listeners conn subs msg
     else return () in
 
   let rec loop () =
@@ -271,9 +265,22 @@ and send_saved_messages broker listeners conn subs =
     else
       P.get_msg_for_delivery broker.b_msg_store subs.qs_name >>= function
           None -> return ()
-        | Some msg -> ignore_result (do_send msg);
-                      loop ()
+        | Some msg ->
+            ignore_result do_send msg
+              (handle_send_msg_exn
+                 ~f:(fun _ -> go_on := false) broker conn msg.msg_id);
+            loop ()
   in loop ()
+
+and handle_send_msg_exn ?(f = fun _ -> ()) broker conn msg_id = function
+  | Lwt_unix.Timeout | Lwt.Canceled ->
+      if broker.b_debug then
+        eprintf "Timeout/Canceled on message %S.\n%!" msg_id;
+      enqueue_after_timeout broker msg_id
+  | _ ->
+      f msg_id;
+      terminate_connection broker conn >>
+      enqueue_after_timeout broker msg_id
 
 and enqueue_after_timeout broker msg_id =
   P.get_ack_pending_msg broker.b_msg_store msg_id >>= function
@@ -303,10 +310,7 @@ let rec send_to_queue broker msg =
         let msg_id = msg.msg_id in
           try_lwt
             send_to_recipient ~kind:Saved broker listeners conn subs msg
-          with Lwt_unix.Timeout | Lwt.Canceled ->
-            if broker.b_debug then
-              eprintf "Timeout/Canceled on new message %S.\n%!" msg_id;
-            enqueue_after_timeout broker msg_id
+          with e -> handle_send_msg_exn broker conn msg_id e
 
 let new_id prefix =
   let cnt = ref 0 in
@@ -355,8 +359,10 @@ let cmd_subscribe broker conn frame =
                          l_last_sent = None }
               in Hashtbl.add broker.b_queues name ls;
                  ls
-          in Lwt.ignore_result
-               (send_saved_messages broker listeners conn subscription);
+          in ignore_result
+               (send_saved_messages broker listeners conn)
+               subscription
+               (fun _ -> return ());
              return ()
         end
   with Not_found ->
@@ -412,13 +418,20 @@ let cmd_send broker conn frame =
     in match destination with
         Topic topic -> send_to_topic broker msg
       | Queue queue ->
-          let save = P.save_msg broker.b_msg_store msg in
+          let save x = P.save_msg broker.b_msg_store x in
             if broker.b_async_send then begin
-              Lwt.ignore_result (save >> send_to_queue broker msg);
+              ignore_result
+                (fun msg -> save msg >> send_to_queue broker msg) msg
+                (fun _ ->
+                   (* hope the error was after saving, otherwise the message
+                   * is going to be dropped and there's nothing we can do
+                   * about it *)
+                   return ());
               return ()
             end else begin
-              lwt () = save in
-                Lwt.ignore_result (send_to_queue broker msg);
+              lwt () = save msg in
+                ignore_result (send_to_queue broker) msg
+                  (fun _ -> (* msg was saved, so we're fine *) return ());
                 return ()
             end
   with Not_found ->
@@ -533,8 +546,8 @@ let server_loop ?(debug = false) broker =
   let broker = { broker with b_debug = debug } in
   let rec loop () =
     lwt (fd, addr) = Lwt_unix.accept broker.b_socket in
-      ignore_result
-        (try_lwt establish_connection broker fd addr with _ -> return ());
+      ignore_result (establish_connection broker fd) addr
+        (fun _ -> return ());
       loop ()
   in
     P.crash_recovery broker.b_msg_store >> loop ()
