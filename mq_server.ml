@@ -213,18 +213,19 @@ and send_saved_messages broker listeners conn subs =
       send_to_recipient ~kind:Ack_pending broker listeners conn subs msg
     else return () in
 
+  let finished = ref false in
   let rec loop () =
     if subs_wanted_msgs (conn, subs) <= 0 then return ()
     else
       P.get_msg_for_delivery broker.b_msg_store subs.qs_name >>= function
           None -> return ()
         | Some msg ->
-            lwt must_continue =
-              try_lwt
-                do_send msg >> return true
-              with e -> handle_send_msg_exn broker conn msg.msg_id e >>
-                        return false
-            in if must_continue then loop () else return ()
+            let msg_id = msg.msg_id in
+              ignore_result do_send msg
+                ~exn_handler:(fun e ->
+                                finished := true;
+                                handle_send_msg_exn broker conn msg_id e);
+              if !finished then return () else loop ()
   in loop ()
 
 and handle_send_msg_exn broker conn msg_id = function
