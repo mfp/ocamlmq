@@ -40,49 +40,31 @@ type subscription = {
 
 let dummy_subscription = { qs_name = ""; qs_prefetch = 0; qs_pending_acks = 0 }
 
-type 'listeners poly_connection = {
+type connection = {
   conn_id : int;
   conn_ich : Lwt_io.input_channel;
   conn_och : Lwt_io.output_channel;
-  conn_prefetch : int;
   mutable conn_pending_acks : (string, unit Lwt.u) Hashtbl.t;
   conn_queues : (string, subscription) Hashtbl.t;
   conn_topics : (string, subscription) Hashtbl.t;
-  conn_blocked_subs : ('listeners * subscription) Queue.t;
 }
 
-(* untying the recursive knot: connection depends on listeners which depends
- * on sets of connections *)
-module rec M : sig
-  type connection = M.listeners poly_connection
-  module SUBS : ExtSet.S with type elt = (connection * subscription)
-  module CONNS : Set.S with type elt = connection
-  type listeners = {
-    mutable l_ready : SUBS.t;
-    mutable l_blocked : SUBS.t;
-    mutable l_last_sent : SUBS.elt option;
-  }
-end =
-struct
-  type connection = M.listeners poly_connection
-  module CONNS = Set.Make(struct
-                            type t = connection
-                            let compare t1 t2 = t2.conn_id - t1.conn_id
+
+module CONNS = Set.Make(struct
+                          type t = connection
+                          let compare t1 t2 = t2.conn_id - t1.conn_id
+                        end)
+
+module SUBS = ExtSet.Make(struct
+                            type t = (connection * subscription)
+                            let compare (t1, _) (t2, _) = t2.conn_id - t1.conn_id
                           end)
 
-  module SUBS = ExtSet.Make(struct
-                              type t = (connection * subscription)
-                              let compare (t1, _) (t2, _) = t2.conn_id - t1.conn_id
-                            end)
-
-  type listeners = {
-    mutable l_ready : SUBS.t;
-    mutable l_blocked : SUBS.t;
-    mutable l_last_sent : SUBS.elt option;
-  }
-end
-
-include M
+type listeners = {
+  mutable l_ready : SUBS.t;
+  mutable l_blocked : SUBS.t;
+  mutable l_last_sent : SUBS.elt option;
+}
 
 type broker = {
   mutable b_connections : CONNS.t;
@@ -145,20 +127,13 @@ let send_to_topic broker msg =
   with Not_found -> return ()
 
 let subs_wanted_msgs (conn, subs) =
-  let local = subs.qs_prefetch - subs.qs_pending_acks in
-  let global = conn.conn_prefetch - Hashtbl.length conn.conn_pending_acks in
-    match subs.qs_prefetch > 0, conn.conn_prefetch > 0 with
-        false, false -> max_int
-      | true, false -> local
-      | false, true -> global
-      | true, true -> min local global
+  if subs.qs_prefetch > 0 then subs.qs_prefetch - subs.qs_pending_acks
+  else max_int
 
 let is_subs_blocked_locally subs =
   subs.qs_prefetch > 0 && subs.qs_pending_acks >= subs.qs_prefetch
 
-let is_subs_blocked (conn, subs) =
-  is_subs_blocked_locally subs ||
-  conn.conn_prefetch > 0 && Hashtbl.length conn.conn_pending_acks >= conn.conn_prefetch
+let is_subs_blocked (conn, subs) = is_subs_blocked_locally subs
 
 let select_blocked_subs s = SUBS.filter is_subs_blocked s
 
@@ -166,11 +141,7 @@ let select_unblocked_subs s = SUBS.filter (fun x -> not (is_subs_blocked x)) s
 
 let block_subscription listeners ((conn, subs) as c) =
   listeners.l_ready <- SUBS.remove c listeners.l_ready;
-  listeners.l_blocked <- SUBS.add c listeners.l_blocked;
-  (* if the subscription is blocked because of the global prefetch limit,
-   * add it to the queue of "globally (per-conn) blocked" subs *)
-  if is_subs_blocked_locally subs then
-    Queue.add (listeners, subs) conn.conn_blocked_subs
+  listeners.l_blocked <- SUBS.add c listeners.l_blocked
 
 let unblock_some_listeners listeners =
   let unblocked = select_unblocked_subs listeners.l_blocked in
@@ -229,22 +200,9 @@ let rec send_to_recipient ~kind broker listeners conn subs msg =
       if broker.b_debug then
         eprintf "ACKed %S by conn %d\n%!" msg_id conn.conn_id;
       P.ack_msg broker.b_msg_store msg_id >>
-      (* first, try to send messages for subscriptions that were blocked
-       * because of the global prefetch limit *)
-      let q = Queue.create () in
-        (* we get the elements and clear the queue "atomically" (no Lwt thread
-         * switches) because other msgs could arrive and cause new
-         * subscriptions to be added to conn.conn_blocked_subs while we are
-         * trying to send messages to subs that were globally blocked before
-         * this ACK *)
-        Queue.transfer conn.conn_blocked_subs q;
-        Queue.iter
-          (fun (listeners, subs) ->
-             ignore_result (send_saved_messages broker listeners conn) subs)
-          q;
-        (* then, try to send older messages for the subscription whose message
-         * we just ACKed *)
-        send_saved_messages broker listeners conn subs
+      (* try to send older messages for the subscription whose message
+       * we just ACKed *)
+      send_saved_messages broker listeners conn subs
     end
 
 and send_saved_messages broker listeners conn subs =
@@ -482,13 +440,9 @@ let establish_connection broker fd addr =
               conn_id = new_conn_id ();
               conn_ich = ich;
               conn_och = och;
-              conn_prefetch =
-                (try int_of_string (STOMP.get_header frame "prefetch")
-                 with _ -> -1);
               conn_pending_acks = Hashtbl.create 13;
               conn_queues = Hashtbl.create 13;
               conn_topics = Hashtbl.create 13;
-              conn_blocked_subs = Queue.create ();
             }
           in begin
             try_lwt
