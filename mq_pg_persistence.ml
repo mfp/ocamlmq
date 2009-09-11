@@ -112,7 +112,7 @@ let register_ack_pending_msg t msg_id =
     return true
   with _ -> return false
 
-let get_msg_for_delivery t queue =
+let rec get_msg_for_delivery t queue =
   WithDB_trans begin
     lwt tuples =
       PGSQL(dbh)
@@ -128,9 +128,15 @@ let get_msg_for_delivery t queue =
         tuple :: _ ->
           let msg = msg_of_tuple tuple in
           let msg_id = msg.msg_id in
-            PGSQL(dbh)
-              "INSERT INTO ocamlmq_pending_acks(msg_id) VALUES ($msg_id)" >>
-            return (Some msg)
+            begin try_lwt
+              PGSQL(dbh)
+                "INSERT INTO ocamlmq_pending_acks(msg_id) VALUES ($msg_id)" >>
+              return (Some msg)
+            with PGOCaml.PostgreSQL_Error _ ->
+              (* FIXME: violates unique constraint, even though we're in a
+               * transaction. Wrong isolation level? *)
+              get_msg_for_delivery t queue
+            end
       | [] -> return None
   end
 
