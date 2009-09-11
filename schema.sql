@@ -9,5 +9,10 @@ CREATE TABLE ocamlmq_msgs(
     body BYTEA NOT NULL
 );
 
-CREATE INDEX ocamlmq_msgs_ack_pending_destination_priority_timestamp ON ocamlmq_msgs
-       USING BTREE(ack_pending, destination, priority, timestamp);
+CREATE INDEX ocamlmq_msgs_destination_priority_timestamp ON ocamlmq_msgs
+       USING BTREE(destination, priority, timestamp);
+
+CREATE INDEX ocamlmq_msgs_ack_pending ON ocamlmq_msgs
+       USING BTREE(ack_pending);
+
+
