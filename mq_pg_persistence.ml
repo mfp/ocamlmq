@@ -107,7 +107,7 @@ let register_ack_pending_new_msg t msg =
   end
 
 let register_ack_pending_msg t msg_id =
-  try
+  try_lwt
     WithDB(PGSQL(dbh) "INSERT INTO ocamlmq_pending_acks(msg_id) VALUES($msg_id)") >>
     return true
   with _ -> return false
