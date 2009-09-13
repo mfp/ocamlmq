@@ -13,3 +13,14 @@ sig
 end
 
 module Make : functor (Ord : Set.OrderedType) -> S with type elt = Ord.t
+
+module Make_lean : functor (Ord : Set.OrderedType) ->
+sig
+  type t
+  val empty : t
+  val is_empty : t -> bool
+  val singleton : Ord.t -> t
+  val iter : (Ord.t -> unit) -> t -> unit
+  val remove : Ord.t -> t -> t
+  val add : Ord.t -> t -> t
+end
