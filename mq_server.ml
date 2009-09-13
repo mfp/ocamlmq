@@ -45,7 +45,7 @@ type connection = {
   conn_och : Lwt_io.output_channel;
   mutable conn_pending_acks : (string, unit Lwt.u) Hashtbl.t;
   conn_queues : (string, subscription) Hashtbl.t;
-  conn_topics : (string, subscription) Hashtbl.t;
+  conn_topics : (string, unit) Hashtbl.t; (* set of topics *)
   mutable conn_closed : bool;
 }
 
@@ -293,18 +293,9 @@ let new_conn_id = let n = ref 0 in fun () -> incr n; !n
 
 let cmd_subscribe broker conn frame =
   try_lwt
-    let destination = STOMP.get_destination frame in
-    let subscription =
-      {
-        qs_prefetch =
-          (try
-             int_of_string (STOMP.get_header frame "prefetch")
-           with _ -> -1);
-        qs_pending_acks = 0;
-      }
-    in match destination with
+    match STOMP.get_destination frame with
         Topic name -> begin
-          Hashtbl.replace conn.conn_topics name subscription;
+          Hashtbl.replace conn.conn_topics name ();
           try
             let s = Hashtbl.find broker.b_topics name in
               s := CONNS.add conn !s;
@@ -314,19 +305,27 @@ let cmd_subscribe broker conn frame =
             return ()
         end
       | Queue name -> begin
-          Hashtbl.replace conn.conn_queues name subscription;
-          begin
-            try
-              let ls = Hashtbl.find broker.b_queues name in
-                ls.l_ready <- SUBS.add (conn, subscription) ls.l_ready;
-            with Not_found ->
-              let ls = { l_ready = SUBS.singleton (conn, subscription);
-                         l_blocked = SUBS.empty;
-                         l_last_sent = None }
-              in Hashtbl.add broker.b_queues name ls
-          end;
-          ignore_result (send_saved_messages broker) name;
-          return ()
+          let subscription =
+            {
+              qs_prefetch =
+                (try
+                   int_of_string (STOMP.get_header frame "prefetch")
+                 with _ -> -1);
+              qs_pending_acks = 0;
+            }
+          in Hashtbl.replace conn.conn_queues name subscription;
+             begin
+               try
+                 let ls = Hashtbl.find broker.b_queues name in
+                   ls.l_ready <- SUBS.add (conn, subscription) ls.l_ready;
+               with Not_found ->
+                 let ls = { l_ready = SUBS.singleton (conn, subscription);
+                            l_blocked = SUBS.empty;
+                            l_last_sent = None }
+                 in Hashtbl.add broker.b_queues name ls
+             end;
+             ignore_result (send_saved_messages broker) name;
+             return ()
         end
   with Not_found ->
     STOMP.send_error ~eol:broker.b_frame_eol conn.conn_och
