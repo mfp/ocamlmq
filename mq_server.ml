@@ -82,6 +82,23 @@ type broker = {
 let ignore_result ?(exn_handler = fun _ -> return ()) f x =
   ignore_result (try_lwt f x with e -> exn_handler e)
 
+let remove_topic_subscription broker topic conn =
+  try
+    let conns = Hashtbl.find broker.b_topics topic in
+      match CONNS.remove conn conns with
+          s when CONNS.is_empty s -> Hashtbl.remove broker.b_topics topic
+        | s -> Hashtbl.replace broker.b_topics topic s
+  with Not_found -> ()
+
+let remove_queue_subscription broker queue conn =
+  try
+    let ls = Hashtbl.find broker.b_queues queue in
+      ls.l_ready <- SUBS.remove (conn, dummy_subscription) ls.l_ready;
+      ls.l_blocked <- SUBS.remove (conn, dummy_subscription) ls.l_blocked;
+      if SUBS.is_empty ls.l_ready && SUBS.is_empty ls.l_blocked then
+        Hashtbl.remove broker.b_queues queue
+  with Not_found -> ()
+
 let terminate_connection broker conn =
   let wakeners =
     Hashtbl.fold (fun _ u l -> u :: l) conn.conn_pending_acks [] in
@@ -95,21 +112,9 @@ let terminate_connection broker conn =
   (* remove from connection set and subscription lists *)
   broker.b_connections <- CONNS.remove conn broker.b_connections;
   Hashtbl.iter
-    (fun topic _ ->
-       try
-         let conns = Hashtbl.find broker.b_topics topic in
-           Hashtbl.replace broker.b_topics topic (CONNS.remove conn conns)
-       with Not_found -> ())
-    conn.conn_topics;
+    (fun topic _ -> remove_topic_subscription broker topic conn) conn.conn_topics;
   Hashtbl.iter
-    (fun k _ ->
-       let rm s = SUBS.remove (conn, dummy_subscription) s in
-       try
-         let ls = Hashtbl.find broker.b_queues k in
-           ls.l_ready <- rm ls.l_ready;
-           ls.l_blocked <- rm ls.l_blocked;
-       with Not_found -> ())
-    conn.conn_queues;
+    (fun queue _ -> remove_queue_subscription broker queue conn) conn.conn_queues;
   (* cancel all the waiters: they will re-queue the corresponding messages *)
   List.iter (fun w -> wakeup_exn w Lwt.Canceled) wakeners;
   return ()
@@ -169,10 +174,7 @@ let find_recipient broker name =
               | c -> Some (ls, c)
   with Not_found -> None
 
-let have_recipient broker name =
-  match find_recipient broker name with
-      Some _ -> true
-    | None -> false
+let have_recipient broker name = Option.is_some (find_recipient broker name)
 
 let rec send_to_recipient ~kind broker listeners conn subs queue msg =
   if broker.b_debug then
@@ -280,14 +282,11 @@ let rec send_to_queue broker msg =
             send_to_recipient ~kind:Saved broker listeners conn subs queue msg
           with e -> handle_send_msg_exn broker conn ~queue ~msg_id e
 
-let new_id prefix =
-  let cnt = ref 0 in
-    fun () ->
-      incr cnt;
-      String.concat "-"
-        [prefix; string_of_float (Unix.gettimeofday ()); string_of_int !cnt]
-
-let new_msg_id = new_id "msg"
+let new_msg_id =
+  let cnt = ref 0 in fun () ->
+    incr cnt;
+    String.concat "-"
+      ["msg"; string_of_float (Unix.gettimeofday ()); string_of_int !cnt]
 
 let new_conn_id = let n = ref 0 in fun () -> incr n; !n
 
@@ -334,24 +333,8 @@ let cmd_subscribe broker conn frame =
 let cmd_unsubscribe broker conn frame =
   try
     match STOMP.get_destination frame with
-        Topic name -> begin
-          try
-            (match CONNS.remove conn (Hashtbl.find broker.b_topics name) with
-                s when CONNS.is_empty s -> Hashtbl.remove broker.b_topics name
-              | s -> Hashtbl.replace broker.b_topics name s);
-            return ()
-          with Not_found -> return ()
-        end
-      | Queue name -> begin
-          try
-            let ls = Hashtbl.find broker.b_queues name in
-              ls.l_ready <- SUBS.remove (conn, dummy_subscription) ls.l_ready;
-              ls.l_blocked <- SUBS.remove (conn, dummy_subscription) ls.l_blocked;
-              if SUBS.is_empty ls.l_ready && SUBS.is_empty ls.l_blocked then
-                Hashtbl.remove broker.b_queues name;
-              return ()
-          with Not_found -> return ()
-        end
+        Topic topic -> remove_topic_subscription broker topic conn; return ()
+      | Queue queue -> remove_queue_subscription broker queue conn; return ()
   with Not_found ->
     STOMP.send_error ~eol:broker.b_frame_eol conn.conn_och
       "Invalid or missing destination: must be of the form /queue/xxx or /topic/xxx."
@@ -414,8 +397,7 @@ let cmd_ack broker conn frame =
 let ignore_command broker conn frame = return ()
 
 let command_handlers = Hashtbl.create 13
-let register_command (name, f) =
-  Hashtbl.add command_handlers name f
+let register_command (name, f) = Hashtbl.add command_handlers name f
 
 let with_receipt f broker conn frame =
   f broker conn frame >>
