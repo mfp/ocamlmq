@@ -468,7 +468,7 @@ let establish_connection broker fd addr =
                   end;
                   Lwt_io.abort och >> terminate_connection broker conn
           end
-      | _ -> Lwt_io.write och "ERROR\n\nExcepted CONNECT frame.\000\n" >>
+      | _ -> Lwt_io.write och "ERROR\n\nExpected CONNECT frame.\000\n" >>
              Lwt_io.flush och >>
              Lwt_io.abort ich
 
