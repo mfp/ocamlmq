@@ -33,12 +33,11 @@ module SSET = Set.Make(String)
 type message_kind = Saved | Ack_pending
 
 type subscription = {
-  qs_name : string;
   qs_prefetch : int;
   mutable qs_pending_acks : int;
 }
 
-let dummy_subscription = { qs_name = ""; qs_prefetch = 0; qs_pending_acks = 0 }
+let dummy_subscription = { qs_prefetch = 0; qs_pending_acks = 0 }
 
 type connection = {
   conn_id : int;
@@ -175,7 +174,7 @@ let have_recipient broker name =
       Some _ -> true
     | None -> false
 
-let rec send_to_recipient ~kind broker listeners conn subs msg =
+let rec send_to_recipient ~kind broker listeners conn subs queue msg =
   if broker.b_debug then
     eprintf "Sending %S to conn %d.\n%!" msg.msg_id conn.conn_id;
   let sleep, wakeup = Lwt.task () in
@@ -215,7 +214,7 @@ let rec send_to_recipient ~kind broker listeners conn subs msg =
       P.ack_msg broker.b_msg_store msg_id >>
       (* try to send older messages for the subscription whose message
        * we just ACKed *)
-      (ignore_result (send_saved_messages broker) subs.qs_name;
+      (ignore_result (send_saved_messages broker) queue;
        return ())
     end
 
@@ -236,7 +235,7 @@ and send_saved_messages broker queue =
             | Some (listeners, (conn, subs)) ->
                 ignore_result
                   ~exn_handler:(handle_send_msg_exn broker conn ~queue ~msg_id)
-                  (send_to_recipient ~kind:Ack_pending broker listeners conn subs)
+                  (send_to_recipient ~kind:Ack_pending broker listeners conn subs queue)
                   msg;
                 if only_once then return () else loop ()
   in loop ()
@@ -265,7 +264,7 @@ and enqueue_after_timeout broker ~queue ~msg_id =
           | Some (listeners, (conn, subs)) ->
               eprintf "Found a recipient for unACKed message %S.\n%!" msg_id;
               try_lwt
-                send_to_recipient ~kind:Ack_pending broker listeners conn subs msg
+                send_to_recipient ~kind:Ack_pending broker listeners conn subs queue msg
               with Lwt_unix.Timeout | Lwt.Canceled ->
                 if broker.b_debug then
                   eprintf "Trying to enqueue unACKed message %S again.\n%!" msg_id;
@@ -278,7 +277,7 @@ let rec send_to_queue broker msg =
     | Some (listeners, (conn, subs)) ->
         let msg_id = msg.msg_id in
           try_lwt
-            send_to_recipient ~kind:Saved broker listeners conn subs msg
+            send_to_recipient ~kind:Saved broker listeners conn subs queue msg
           with e -> handle_send_msg_exn broker conn ~queue ~msg_id e
 
 let new_id prefix =
@@ -297,7 +296,6 @@ let cmd_subscribe broker conn frame =
     let destination = STOMP.get_destination frame in
     let subscription =
       {
-        qs_name = (match destination with Topic n | Queue n -> n);
         qs_prefetch =
           (try
              int_of_string (STOMP.get_header frame "prefetch")
