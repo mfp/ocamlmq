@@ -69,7 +69,7 @@ type listeners = {
 type broker = {
   mutable b_connections : CONNS.t;
   b_queues : (string, listeners) Hashtbl.t;
-  b_topics : (string, CONNS.t ref) Hashtbl.t;
+  b_topics : (string, CONNS.t) Hashtbl.t;
   b_socket : Lwt_unix.file_descr;
   b_frame_eol : bool;
   b_msg_store : P.t;
@@ -95,10 +95,10 @@ let terminate_connection broker conn =
   (* remove from connection set and subscription lists *)
   broker.b_connections <- CONNS.remove conn broker.b_connections;
   Hashtbl.iter
-    (fun k _ ->
+    (fun topic _ ->
        try
-         let s = Hashtbl.find broker.b_topics k in
-           s := CONNS.remove conn !s
+         let conns = Hashtbl.find broker.b_topics topic in
+           Hashtbl.replace broker.b_topics topic (CONNS.remove conn conns)
        with Not_found -> ())
     conn.conn_topics;
   Hashtbl.iter
@@ -125,7 +125,7 @@ let send_to_topic broker msg =
         (fun conn ->
            ignore_result
              (STOMP.send_message ~eol:broker.b_frame_eol conn.conn_och) msg)
-        (CONNS.elements !s);
+        (CONNS.elements s);
       return ()
   with Not_found -> return ()
 
@@ -297,11 +297,11 @@ let cmd_subscribe broker conn frame =
         Topic name -> begin
           Hashtbl.replace conn.conn_topics name ();
           try
-            let s = Hashtbl.find broker.b_topics name in
-              s := CONNS.add conn !s;
+            let conns = Hashtbl.find broker.b_topics name in
+              Hashtbl.replace broker.b_topics name (CONNS.add conn conns);
               return ()
           with Not_found ->
-            Hashtbl.add broker.b_topics name (ref (CONNS.singleton conn));
+            Hashtbl.add broker.b_topics name (CONNS.singleton conn);
             return ()
         end
       | Queue name -> begin
@@ -336,11 +336,10 @@ let cmd_unsubscribe broker conn frame =
     match STOMP.get_destination frame with
         Topic name -> begin
           try
-            let s = Hashtbl.find broker.b_topics name in
-              s := CONNS.remove conn !s;
-              if CONNS.is_empty !s then
-                Hashtbl.remove broker.b_topics name;
-              return ()
+            (match CONNS.remove conn (Hashtbl.find broker.b_topics name) with
+                s when CONNS.is_empty s -> Hashtbl.remove broker.b_topics name
+              | s -> Hashtbl.replace broker.b_topics name s);
+            return ()
           with Not_found -> return ()
         end
       | Queue name -> begin
