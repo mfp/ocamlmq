@@ -14,6 +14,8 @@ let db_max_conns = ref 10
 let port = ref 44444
 let debug = ref false
 let initdb = ref false
+let login = ref None
+let passcode = ref None
 
 let params =
   Arg.align
@@ -26,6 +28,8 @@ let params =
       "-dbpassword", set_some_string db_password, "PASSWORD Database password.";
       "-dbmaxconns", Arg.Set_int db_max_conns, "NUM Maximum size of DB connection pool.";
       "-port", Arg.Set_int port, "PORT Port to listen at.";
+      "-login", set_some_string login, "LOGIN Login expected in CONNECT.";
+      "-passcode", set_some_string passcode, "PASSCODE Passcode expected in CONNECT.";
       "-initdb", Arg.Set initdb, " Initialize the database (create required tables).";
       "-debug", Arg.Set debug, " Write debug info to stderr.";
     ]
@@ -66,8 +70,9 @@ let () =
            eprintf "Initializing database.\n%!";
            Mq_pg_persistence.initialize msg_store
          end else return ()) >>
-        lwt broker = SERVER.make_broker msg_store addr in
-          SERVER.server_loop ~debug:!debug broker
+        lwt broker = SERVER.make_broker
+                       ?login:!login ?passcode:!passcode msg_store addr
+        in SERVER.server_loop ~debug:!debug broker
     end
 
 

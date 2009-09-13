@@ -77,6 +77,8 @@ type broker = {
   b_debug : bool;
   b_async_maxmem : int;
   mutable b_async_usedmem : int;
+  b_login : string option;
+  b_passcode : string option;
 }
 
 let ignore_result ?(exn_handler = fun _ -> return ()) f x =
@@ -430,12 +432,26 @@ let handle_connection broker conn =
     loop ()
   in loop ()
 
+let connect_error msg ich och =
+  Lwt_io.write och msg >> Lwt_io.flush och >> Lwt_io.abort ich
+
+let valid_credentials broker frame =
+  try
+    let check_value name v =
+      if STOMP.get_header frame name <> v then raise Exit
+    in Option.may (check_value "login") broker.b_login;
+       Option.may (check_value "passcode") broker.b_passcode;
+       true
+  with Not_found | Exit -> false
+
 let establish_connection broker fd addr =
   let ich = Lwt_io.of_fd Lwt_io.input fd in
   let och = Lwt_io.of_fd Lwt_io.output fd in
   lwt frame = STOMP.read_stomp_frame ~eol:broker.b_frame_eol ich in
     match frame.STOMP.fr_command with
-        "CONNECT" ->
+        "CONNECT" when not (valid_credentials broker frame) ->
+          connect_error "Invalid credentials." ich och
+      | "CONNECT" ->
           let conn =
             {
               conn_id = new_conn_id ();
@@ -468,13 +484,12 @@ let establish_connection broker fd addr =
                   end;
                   Lwt_io.abort och >> terminate_connection broker conn
           end
-      | _ -> Lwt_io.write och "ERROR\n\nExpected CONNECT frame.\000\n" >>
-             Lwt_io.flush och >>
-             Lwt_io.abort ich
+      | _ -> connect_error "ERROR\n\nExpected CONNECT frame.\000\n" ich och
 
 let make_broker
       ?(frame_eol = true) ?(force_send_async = false)
       ?(send_async_max_mem = 32 * 1024 * 1024)
+      ?login ?passcode
       msg_store address =
   let sock = Lwt_unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
   Lwt_unix.setsockopt sock Unix.SO_REUSEADDR true;
@@ -491,6 +506,8 @@ let make_broker
     b_async_maxmem = send_async_max_mem;
     b_async_usedmem = 0;
     b_debug = false;
+    b_login = login;
+    b_passcode = passcode;
   }
 
 let server_loop ?(debug = false) broker =
