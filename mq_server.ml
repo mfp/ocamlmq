@@ -381,13 +381,14 @@ let cmd_send broker conn frame =
         Topic topic -> send_to_topic broker msg
       | Queue queue ->
           let save x = P.save_msg broker.b_msg_store x in
-            if broker.b_async_send then begin
-              ignore_result (fun x -> save x >> send_to_queue broker x) msg;
-              return ()
-            end else begin
+            if not broker.b_async_send &&
+               List.mem_assoc "receipt" frame.STOMP.fr_headers then begin
               lwt () = save msg in
                 ignore_result (send_to_queue broker) msg;
                 return ()
+            end else begin
+              ignore_result (fun x -> save x >> send_to_queue broker x) msg;
+              return ()
             end
   with Not_found ->
     STOMP.send_error ~eol:broker.b_frame_eol conn.conn_och
