@@ -74,8 +74,10 @@ type broker = {
   b_socket : Lwt_unix.file_descr;
   b_frame_eol : bool;
   b_msg_store : P.t;
-  b_async_send : bool;
+  b_force_async : bool;
   b_debug : bool;
+  b_async_maxmem : int;
+  mutable b_async_usedmem : int;
 }
 
 let ignore_result ?(exn_handler = fun _ -> return ()) f x =
@@ -381,13 +383,24 @@ let cmd_send broker conn frame =
         Topic topic -> send_to_topic broker msg
       | Queue queue ->
           let save x = P.save_msg broker.b_msg_store x in
-            if not broker.b_async_send &&
-               List.mem_assoc "receipt" frame.STOMP.fr_headers then begin
+          let len = String.length msg.msg_body in
+            if broker.b_async_maxmem - len <= broker.b_async_usedmem ||
+              (not broker.b_force_async &&
+                List.mem_assoc "receipt" frame.STOMP.fr_headers)
+            then begin
               lwt () = save msg in
                 ignore_result (send_to_queue broker) msg;
                 return ()
             end else begin
-              ignore_result (fun x -> save x >> send_to_queue broker x) msg;
+              broker.b_async_usedmem <- broker.b_async_usedmem + len;
+              ignore_result
+                (fun x ->
+                   try_lwt
+                     save x >> send_to_queue broker x
+                   finally
+                     broker.b_async_usedmem <- broker.b_async_usedmem - len;
+                     return ())
+                msg;
               return ()
             end
   with Not_found ->
@@ -480,7 +493,10 @@ let establish_connection broker fd addr =
              Lwt_io.flush och >>
              Lwt_io.abort ich
 
-let make_broker ?(frame_eol = true) ?(send_async = false) msg_store address =
+let make_broker
+      ?(frame_eol = true) ?(force_send_async = false)
+      ?(send_async_max_mem = 32 * 1024 * 1024)
+      msg_store address =
   let sock = Lwt_unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
   Lwt_unix.setsockopt sock Unix.SO_REUSEADDR true;
   Lwt_unix.bind sock address;
@@ -492,7 +508,9 @@ let make_broker ?(frame_eol = true) ?(send_async = false) msg_store address =
     b_socket = sock;
     b_frame_eol = frame_eol;
     b_msg_store = msg_store;
-    b_async_send = send_async;
+    b_force_async = force_send_async;
+    b_async_maxmem = send_async_max_mem;
+    b_async_usedmem = 0;
     b_debug = false;
   }
 
