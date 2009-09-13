@@ -31,6 +31,7 @@ INCLUDE "mq_schema.ml"
 
 type t = {
   dbconns : PGOCaml.pa_pg_data PGOCaml.t Lwt_pool.t;
+  dbconns' : PGOCaml.pa_pg_data PGOCaml.t Lwt_pool.t; (* low priority *)
   debug : bool
 }
 
@@ -38,14 +39,16 @@ let initialize t = Lwt_pool.use t.dbconns create_db
 
 let connect
       ?host ?port ?unix_domain_socket_dir ?database ?user ?password
-      ?(debug = false) ?(max_conns = 1) () =
+      ?(debug = false) ?(max_conns = 2) () =
   let create_conn () = PGOCaml.connect ?host ?port ?database ?unix_domain_socket_dir
                          ?user ?password () in
-  let pool = Lwt_pool.create max_conns create_conn in
+  let max_conns = max 2 max_conns in
+  let pool = Lwt_pool.create (max_conns / 2) create_conn in
+  let pool' = Lwt_pool.create (max_conns / 2) create_conn in
     (* try to connect so we raise the exception as early as possible if
      * something's wrong *)
   Lwt_pool.use pool (fun _ -> return ()) >>
-  return { dbconns = pool; debug = debug }
+  return { dbconns = pool; dbconns' = pool'; debug = debug }
 
 let msg_of_tuple (msg_id, dst, timestamp, priority, ack_timeout, body) =
   {
@@ -57,11 +60,9 @@ let msg_of_tuple (msg_id, dst, timestamp, priority, ack_timeout, body) =
     msg_body = body;
   }
 
-let with_db t f = Lwt_pool.use t.dbconns f
-
-DEFINE WithDB(x) = with_db t (fun dbh -> x)
+DEFINE WithDB(x) = Lwt_pool.use t.dbconns (fun dbh -> x)
 DEFINE WithDB_trans(x) =
-  with_db t
+  Lwt_pool.use t.dbconns
     (fun dbh ->
        PGOCaml.begin_work dbh >>
        try_lwt
@@ -69,7 +70,7 @@ DEFINE WithDB_trans(x) =
          PGOCaml.commit dbh >> return y
        with e -> PGOCaml.rollback dbh >> fail e)
 
-let do_save t ?(ack_pending = false) msg =
+let do_save t dbh ?(ack_pending = false) msg =
   let body = msg.msg_body in
   let time = CalendarLib.Calendar.from_unixfloat msg.msg_timestamp in
   let msg_id = msg.msg_id in
@@ -77,17 +78,17 @@ let do_save t ?(ack_pending = false) msg =
   let queue = destination_name msg.msg_destination in
   let ack_timeout = msg.msg_ack_timeout in
     if t.debug then eprintf "Saving message %S.\n%!" msg_id;
-    WithDB begin
-      PGSQL(dbh)
-       "INSERT INTO ocamlmq_msgs(msg_id, ack_pending, priority, destination,
-                                 timestamp, ack_timeout, body)
-               VALUES ($msg_id, $ack_pending, $priority, $queue, $time,
-                       $ack_timeout, $body)"
-    end
+    PGSQL(dbh)
+     "INSERT INTO ocamlmq_msgs(msg_id, ack_pending, priority, destination,
+                               timestamp, ack_timeout, body)
+             VALUES ($msg_id, $ack_pending, $priority, $queue, $time,
+                     $ack_timeout, $body)"
 
-let save_msg t msg = match msg.msg_destination with
+let save_msg t ?(low_priority = false) msg = match msg.msg_destination with
     Topic _ -> return ()
-  | Queue queue -> do_save t msg
+  | Queue queue ->
+      if not low_priority then WithDB(do_save t dbh msg)
+      else Lwt_pool.use t.dbconns' (fun dbh -> do_save t dbh msg)
 
 let get_ack_pending_msg t msg_id =
   WithDB begin
@@ -101,7 +102,7 @@ let get_ack_pending_msg t msg_id =
     | [] -> return None
 
 let register_ack_pending_new_msg t msg =
-  WithDB(do_save t ~ack_pending:true msg)
+  WithDB(do_save t dbh ~ack_pending:true msg)
 
 let register_ack_pending_msg t msg_id =
   try_lwt

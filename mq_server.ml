@@ -10,7 +10,7 @@ sig
 
   val initialize : t -> unit Lwt.t
 
-  val save_msg : t -> Mq_types.message -> unit Lwt.t
+  val save_msg : t -> ?low_priority:bool -> Mq_types.message -> unit Lwt.t
   val register_ack_pending_new_msg : t -> Mq_types.message -> unit Lwt.t
 
   (** Returns [false] if the msg was already in the ACK-pending set. *)
@@ -382,7 +382,8 @@ let cmd_send broker conn frame =
     in match destination with
         Topic topic -> send_to_topic broker msg
       | Queue queue ->
-          let save x = P.save_msg broker.b_msg_store x in
+          let save ?low_priority x =
+            P.save_msg ?low_priority broker.b_msg_store x in
           let len = String.length msg.msg_body in
             if broker.b_async_maxmem - len <= broker.b_async_usedmem ||
               (not broker.b_force_async &&
@@ -396,7 +397,7 @@ let cmd_send broker conn frame =
               ignore_result
                 (fun x ->
                    try_lwt
-                     save x >> send_to_queue broker x
+                     save ~low_priority:true x >> send_to_queue broker x
                    finally
                      broker.b_async_usedmem <- broker.b_async_usedmem - len;
                      return ())
