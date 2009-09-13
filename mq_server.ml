@@ -360,7 +360,6 @@ let cmd_unsubscribe broker conn frame =
 
 let cmd_disconnect broker conn frame =
   Lwt_io.abort conn.conn_och >>
-  Lwt_io.abort conn.conn_ich >>
   fail End_of_file
 
 let cmd_send broker conn frame =
