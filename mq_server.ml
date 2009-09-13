@@ -50,10 +50,10 @@ type connection = {
 }
 
 
-module CONNS = Set.Make(struct
-                          type t = connection
-                          let compare t1 t2 = t2.conn_id - t1.conn_id
-                        end)
+module CONNS = ExtSet.Make_lean(struct
+                                  type t = connection
+                                  let compare t1 t2 = t2.conn_id - t1.conn_id
+                                end)
 
 module SUBS = ExtSet.Make(struct
                             type t = (connection * subscription)
@@ -126,11 +126,11 @@ let send_to_topic broker msg =
   Lwt_unix.yield () >>
   try
     let s = Hashtbl.find broker.b_topics (destination_name msg.msg_destination) in
-      List.iter
+      CONNS.iter
         (fun conn ->
            ignore_result
              (STOMP.send_message ~eol:broker.b_frame_eol conn.conn_och) msg)
-        (CONNS.elements s);
+        s;
       return ()
   with Not_found -> return ()
 
