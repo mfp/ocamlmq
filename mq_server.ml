@@ -222,26 +222,21 @@ let rec send_to_recipient ~kind broker listeners conn subs queue msg =
        return ())
     end
 
-and send_saved_messages broker queue =
-  let rec loop ?(only_once = false) () =
-    if not (have_recipient broker queue) then return () else
-    P.get_msg_for_delivery broker.b_msg_store queue >>= function
-        None -> return ()
-      | Some msg ->
-          let msg_id = msg.msg_id in
-          match find_recipient broker queue with
-              None ->
-                (* there was no recipient after all (it was closed or blocked
-                 * in the meantime, so unack the msg, and try to deliver
-                 * again in a while *)
-                P.unack_msg broker.b_msg_store msg_id >> loop ~only_once:true ()
-            | Some (listeners, (conn, subs)) ->
-                ignore_result
-                  ~exn_handler:(handle_send_msg_exn broker conn ~queue ~msg_id)
-                  (send_to_recipient ~kind:Ack_pending broker listeners conn subs queue)
-                  msg;
-                if only_once then return () else loop ()
-  in loop ()
+and send_saved_messages ?(only_once = false) broker queue =
+  if not (have_recipient broker queue) then return () else
+  P.get_msg_for_delivery broker.b_msg_store queue >>= function
+      None -> return ()
+    | Some msg ->
+        let msg_id = msg.msg_id in
+        match find_recipient broker queue with
+            None -> P.unack_msg broker.b_msg_store msg_id >>
+                    send_saved_messages ~only_once:true broker queue
+          | Some (listeners, (conn, subs)) ->
+              ignore_result
+                ~exn_handler:(handle_send_msg_exn broker conn ~queue ~msg_id)
+                (send_to_recipient ~kind:Ack_pending broker listeners conn subs queue)
+                msg;
+              if only_once then return () else send_saved_messages broker queue
 
 and handle_send_msg_exn broker ~queue conn ~msg_id = function
   | Lwt_unix.Timeout | Lwt.Canceled ->
