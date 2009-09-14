@@ -21,6 +21,7 @@ OBJECTS[] =
     extSet
     mq_types
     mq_stomp
+    pGOCaml_lwt
     mq_pg_persistence
     mq_server
     ocamlmq
