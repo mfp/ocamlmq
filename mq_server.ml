@@ -24,6 +24,7 @@ struct
 open Mq_types
 module STOMP = Mq_stomp
 module SSET = Set.Make(String)
+module H = Hashtbl
 
 type message_kind = Saved | Ack_pending
 
@@ -38,9 +39,9 @@ type connection = {
   conn_id : int;
   conn_ich : Lwt_io.input_channel;
   conn_och : Lwt_io.output_channel;
-  mutable conn_pending_acks : (string, unit Lwt.u) Hashtbl.t;
-  conn_queues : (string, subscription) Hashtbl.t;
-  conn_topics : (string, unit) Hashtbl.t; (* set of topics *)
+  mutable conn_pending_acks : (string, unit Lwt.u) H.t;
+  conn_queues : (string, subscription) H.t;
+  conn_topics : (string, unit) H.t; (* set of topics *)
   mutable conn_closed : bool;
 }
 
@@ -63,8 +64,8 @@ type listeners = {
 
 type broker = {
   mutable b_connections : CONNS.t;
-  b_queues : (string, listeners) Hashtbl.t;
-  b_topics : (string, CONNS.t) Hashtbl.t;
+  b_queues : (string, listeners) H.t;
+  b_topics : (string, CONNS.t) H.t;
   b_socket : Lwt_unix.file_descr;
   b_frame_eol : bool;
   b_msg_store : P.t;
@@ -79,26 +80,26 @@ type broker = {
 let ignore_result ?(exn_handler = fun _ -> return ()) f x =
   ignore_result (try_lwt f x with e -> exn_handler e)
 
-let remove_topic_subscription broker topic conn =
+let remove_topic_subs broker topic conn =
   try
-    let conns = Hashtbl.find broker.b_topics topic in
+    let conns = H.find broker.b_topics topic in
       match CONNS.remove conn conns with
-          s when CONNS.is_empty s -> Hashtbl.remove broker.b_topics topic
-        | s -> Hashtbl.replace broker.b_topics topic s
+          s when CONNS.is_empty s -> H.remove broker.b_topics topic
+        | s -> H.replace broker.b_topics topic s
   with Not_found -> ()
 
-let remove_queue_subscription broker queue conn =
+let remove_queue_subs broker queue conn =
   try
-    let ls = Hashtbl.find broker.b_queues queue in
+    let ls = H.find broker.b_queues queue in
       ls.l_ready <- SUBS.remove (conn, dummy_subscription) ls.l_ready;
       ls.l_blocked <- SUBS.remove (conn, dummy_subscription) ls.l_blocked;
       if SUBS.is_empty ls.l_ready && SUBS.is_empty ls.l_blocked then
-        Hashtbl.remove broker.b_queues queue
+        H.remove broker.b_queues queue
   with Not_found -> ()
 
 let terminate_connection broker conn =
   let wakeners =
-    Hashtbl.fold (fun _ u l -> u :: l) conn.conn_pending_acks [] in
+    H.fold (fun _ u l -> u :: l) conn.conn_pending_acks [] in
 
   conn.conn_closed <- true;
 
@@ -108,10 +109,8 @@ let terminate_connection broker conn =
 
   (* remove from connection set and subscription lists *)
   broker.b_connections <- CONNS.remove conn broker.b_connections;
-  Hashtbl.iter
-    (fun topic _ -> remove_topic_subscription broker topic conn) conn.conn_topics;
-  Hashtbl.iter
-    (fun queue _ -> remove_queue_subscription broker queue conn) conn.conn_queues;
+  H.iter (fun topic _ -> remove_topic_subs broker topic conn) conn.conn_topics;
+  H.iter (fun queue _ -> remove_queue_subs broker queue conn) conn.conn_queues;
   (* cancel all the waiters: they will re-queue the corresponding messages *)
   List.iter (fun w -> wakeup_exn w Lwt.Canceled) wakeners;
   return ()
@@ -119,29 +118,22 @@ let terminate_connection broker conn =
 let send_error broker conn fmt =
   STOMP.send_error ~eol:broker.b_frame_eol conn.conn_och fmt
 
-let send_to_topic broker msg =
+let send_to_topic broker topic msg =
   Lwt_unix.yield () >>
   try
-    let s = Hashtbl.find broker.b_topics (destination_name msg.msg_destination) in
-      CONNS.iter
-        (fun conn ->
-           ignore_result
-             (STOMP.send_message ~eol:broker.b_frame_eol conn.conn_och) msg)
-        s;
-      return ()
+    CONNS.iter
+      (fun conn ->
+         ignore_result
+           (STOMP.send_message ~eol:broker.b_frame_eol conn.conn_och) msg)
+      (H.find broker.b_topics topic);
+    return ()
   with Not_found -> return ()
-
-let subs_wanted_msgs (conn, subs) =
-  if subs.qs_prefetch > 0 then subs.qs_prefetch - subs.qs_pending_acks
-  else max_int
 
 let is_subs_blocked_locally subs =
   subs.qs_prefetch > 0 && subs.qs_pending_acks >= subs.qs_prefetch
 
 let is_subs_blocked (conn, subs) =
   conn.conn_closed || is_subs_blocked_locally subs
-
-let select_blocked_subs s = SUBS.filter is_subs_blocked s
 
 let select_unblocked_subs s = SUBS.filter (fun x -> not (is_subs_blocked x)) s
 
@@ -156,7 +148,7 @@ let unblock_some_listeners listeners =
 
 let find_recipient broker name =
   try
-    let ls = Hashtbl.find broker.b_queues name in
+    let ls = H.find broker.b_queues name in
       match ls.l_last_sent with
           None -> (* first msg sent, there can be no blocked client *)
             Some (ls, SUBS.min_elt ls.l_ready)
@@ -179,7 +171,7 @@ let rec send_to_recipient ~kind broker listeners conn subs queue msg =
   let sleep, wakeup = Lwt.task () in
   let msg_id = msg.msg_id in
     subs.qs_pending_acks <- subs.qs_pending_acks + 1;
-    Hashtbl.replace conn.conn_pending_acks msg_id wakeup;
+    H.replace conn.conn_pending_acks msg_id wakeup;
     if is_subs_blocked (conn, subs) then block_subscription listeners (conn, subs);
     (* we check after doing block_subscription so that the next find_recipient
      * won't get this connection *)
@@ -203,7 +195,7 @@ let rec send_to_recipient ~kind broker listeners conn subs queue msg =
       Lwt.select threads
     finally
       (* either ACKed or Timeout/Cancel, at any rate, no longer want the ACK *)
-      Hashtbl.remove conn.conn_pending_acks msg_id;
+      H.remove conn.conn_pending_acks msg_id;
       subs.qs_pending_acks <- subs.qs_pending_acks - 1;
       return ()
     end >>
@@ -265,8 +257,7 @@ and enqueue_after_timeout broker ~queue ~msg_id =
                   eprintf "Trying to enqueue unACKed message %S again.\n%!" msg_id;
                 enqueue_after_timeout broker ~queue ~msg_id
 
-let rec send_to_queue broker msg =
-  let queue = destination_name msg.msg_destination in
+let rec send_to_queue broker queue msg =
   match find_recipient broker queue with
       None -> return ()
     | Some (listeners, (conn, subs)) ->
@@ -287,13 +278,13 @@ let cmd_subscribe broker conn frame =
   try_lwt
     match STOMP.get_destination frame with
         Topic name -> begin
-          Hashtbl.replace conn.conn_topics name ();
+          H.replace conn.conn_topics name ();
           try
-            let conns = Hashtbl.find broker.b_topics name in
-              Hashtbl.replace broker.b_topics name (CONNS.add conn conns);
+            let conns = H.find broker.b_topics name in
+              H.replace broker.b_topics name (CONNS.add conn conns);
               return ()
           with Not_found ->
-            Hashtbl.add broker.b_topics name (CONNS.singleton conn);
+            H.add broker.b_topics name (CONNS.singleton conn);
             return ()
         end
       | Queue name -> begin
@@ -305,16 +296,16 @@ let cmd_subscribe broker conn frame =
                  with _ -> -1);
               qs_pending_acks = 0;
             }
-          in Hashtbl.replace conn.conn_queues name subscription;
+          in H.replace conn.conn_queues name subscription;
              begin
                try
-                 let ls = Hashtbl.find broker.b_queues name in
+                 let ls = H.find broker.b_queues name in
                    ls.l_ready <- SUBS.add (conn, subscription) ls.l_ready;
                with Not_found ->
                  let ls = { l_ready = SUBS.singleton (conn, subscription);
                             l_blocked = SUBS.empty;
                             l_last_sent = None }
-                 in Hashtbl.add broker.b_queues name ls
+                 in H.add broker.b_queues name ls
              end;
              ignore_result (send_saved_messages broker) name;
              return ()
@@ -326,15 +317,14 @@ let cmd_subscribe broker conn frame =
 let cmd_unsubscribe broker conn frame =
   try
     match STOMP.get_destination frame with
-        Topic topic -> remove_topic_subscription broker topic conn; return ()
-      | Queue queue -> remove_queue_subscription broker queue conn; return ()
+        Topic topic -> remove_topic_subs broker topic conn; return ()
+      | Queue queue -> remove_queue_subs broker queue conn; return ()
   with Not_found ->
     STOMP.send_error ~eol:broker.b_frame_eol conn.conn_och
       "Invalid or missing destination: must be of the form /queue/xxx or /topic/xxx."
 
 let cmd_disconnect broker conn frame =
-  Lwt_io.abort conn.conn_och >>
-  fail End_of_file
+  Lwt_io.abort conn.conn_och >> fail End_of_file
 
 let cmd_send broker conn frame =
   try_lwt
@@ -352,7 +342,7 @@ let cmd_send broker conn frame =
            with _ -> 0.)
       }
     in match destination with
-        Topic topic -> send_to_topic broker msg
+        Topic topic -> send_to_topic broker topic msg
       | Queue queue ->
           let save ?low_priority x =
             P.save_msg ?low_priority broker.b_msg_store x in
@@ -362,14 +352,14 @@ let cmd_send broker conn frame =
                 List.mem_assoc "receipt" frame.STOMP.fr_headers)
             then begin
               lwt () = save msg in
-                ignore_result (send_to_queue broker) msg;
+                ignore_result (send_to_queue broker queue) msg;
                 return ()
             end else begin
               broker.b_async_usedmem <- broker.b_async_usedmem + len;
               ignore_result
                 (fun x ->
                    try_lwt
-                     save ~low_priority:true x >> send_to_queue broker x
+                     save ~low_priority:true x >> send_to_queue broker queue x
                    finally
                      broker.b_async_usedmem <- broker.b_async_usedmem - len;
                      return ())
@@ -383,14 +373,14 @@ let cmd_send broker conn frame =
 let cmd_ack broker conn frame =
   try_lwt
     let msg_id = STOMP.get_header frame "message-id" in
-      wakeup (Hashtbl.find conn.conn_pending_acks msg_id) ();
+      wakeup (H.find conn.conn_pending_acks msg_id) ();
       return ()
   with Not_found -> return ()
 
 let ignore_command broker conn frame = return ()
 
-let command_handlers = Hashtbl.create 13
-let register_command (name, f) = Hashtbl.add command_handlers name f
+let command_handlers = H.create 13
+let register_command (name, f) = H.add command_handlers name f
 
 let with_receipt f broker conn frame =
   f broker conn frame >>
@@ -414,7 +404,7 @@ let () =
 
 let handle_frame broker conn frame =
   try
-    Hashtbl.find command_handlers frame.STOMP.fr_command
+    H.find command_handlers frame.STOMP.fr_command
       broker conn frame
   with Not_found ->
     send_error broker conn "Unknown command %S." frame.STOMP.fr_command
@@ -451,9 +441,9 @@ let establish_connection broker fd addr =
               conn_id = new_conn_id ();
               conn_ich = ich;
               conn_och = och;
-              conn_pending_acks = Hashtbl.create 13;
-              conn_queues = Hashtbl.create 13;
-              conn_topics = Hashtbl.create 13;
+              conn_pending_acks = H.create 13;
+              conn_queues = H.create 13;
+              conn_topics = H.create 13;
               conn_closed = false;
             }
           in begin
@@ -491,8 +481,8 @@ let make_broker
   Lwt_unix.listen sock 1024;
   return {
     b_connections = CONNS.empty;
-    b_queues = Hashtbl.create 13;
-    b_topics = Hashtbl.create 13;
+    b_queues = H.create 13;
+    b_topics = H.create 13;
     b_socket = sock;
     b_frame_eol = frame_eol;
     b_msg_store = msg_store;
