@@ -1,18 +1,13 @@
 open Printf
 open Lwt
 
-(** Simple STOMP message queue. *)
-
-(** Message store. *)
 module type PERSISTENCE =
 sig
   type t
 
   val initialize : t -> unit Lwt.t
-
   val save_msg : t -> ?low_priority:bool -> Mq_types.message -> unit Lwt.t
   val register_ack_pending_new_msg : t -> Mq_types.message -> unit Lwt.t
-
   (** Returns [false] if the msg was already in the ACK-pending set. *)
   val register_ack_pending_msg : t -> string -> bool Lwt.t
   val get_ack_pending_msg : t -> string -> Mq_types.message option Lwt.t
@@ -401,6 +396,9 @@ let with_receipt f broker conn frame =
   f broker conn frame >>
   STOMP.handle_receipt ~eol:broker.b_frame_eol conn.conn_och frame
 
+let not_implemented broker conn frame =
+  send_error broker conn "Not implemented: %s" frame.STOMP.fr_command
+
 let () =
   List.iter register_command
     [
@@ -409,9 +407,9 @@ let () =
       "SEND", with_receipt cmd_send;
       "DISCONNECT", cmd_disconnect;
       "ACK", with_receipt cmd_ack;
-      "BEGIN", with_receipt ignore_command;
-      "COMMIT", with_receipt ignore_command;
-      "ABORT", with_receipt ignore_command;
+      "BEGIN", not_implemented;
+      "COMMIT", not_implemented;
+      "ABORT", not_implemented;
     ]
 
 let handle_frame broker conn frame =
