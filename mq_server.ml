@@ -248,7 +248,8 @@ and handle_send_msg_exn broker ~queue conn ~msg_id = function
 
 and enqueue_after_timeout broker ~queue ~msg_id =
   if not (have_recipient broker queue) then
-    P.unack_msg broker.b_msg_store msg_id >> send_saved_messages broker queue else
+    P.unack_msg broker.b_msg_store msg_id >>
+    send_saved_messages ~only_once:true broker queue else
   P.get_ack_pending_msg broker.b_msg_store msg_id >>= function
       None -> return ()
     | Some msg ->
@@ -258,7 +259,7 @@ and enqueue_after_timeout broker ~queue ~msg_id =
               if broker.b_debug then
                 eprintf "No recipient for unACKed message %S, saving.\n%!" msg_id;
               P.unack_msg broker.b_msg_store msg_id >>
-              send_saved_messages broker queue
+              send_saved_messages ~only_once:true broker queue
             end
           | Some (listeners, (conn, subs)) ->
               eprintf "Found a recipient for unACKed message %S.\n%!" msg_id;
