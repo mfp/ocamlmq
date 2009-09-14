@@ -234,8 +234,7 @@ and send_saved_messages broker queue =
                 (* there was no recipient after all (it was closed or blocked
                  * in the meantime, so unack the msg, and try to deliver
                  * again in a while *)
-                P.unack_msg broker.b_msg_store msg_id >> Lwt_unix.sleep 5. >>
-                loop ~only_once:true ()
+                P.unack_msg broker.b_msg_store msg_id >> loop ~only_once:true ()
             | Some (listeners, (conn, subs)) ->
                 ignore_result
                   ~exn_handler:(handle_send_msg_exn broker conn ~queue ~msg_id)
@@ -254,7 +253,7 @@ and handle_send_msg_exn broker ~queue conn ~msg_id = function
 
 and enqueue_after_timeout broker ~queue ~msg_id =
   if not (have_recipient broker queue) then
-    P.unack_msg broker.b_msg_store msg_id else
+    P.unack_msg broker.b_msg_store msg_id >> send_saved_messages broker queue else
   P.get_ack_pending_msg broker.b_msg_store msg_id >>= function
       None -> return ()
     | Some msg ->
@@ -263,7 +262,8 @@ and enqueue_after_timeout broker ~queue ~msg_id =
           | None -> begin (* move to main table *)
               if broker.b_debug then
                 eprintf "No recipient for unACKed message %S, saving.\n%!" msg_id;
-              P.unack_msg broker.b_msg_store msg_id
+              P.unack_msg broker.b_msg_store msg_id >>
+              send_saved_messages broker queue
             end
           | Some (listeners, (conn, subs)) ->
               eprintf "Found a recipient for unACKed message %S.\n%!" msg_id;
