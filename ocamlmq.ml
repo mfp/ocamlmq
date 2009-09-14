@@ -11,7 +11,7 @@ let db_user = ref None
 let db_password = ref None
 let db_unix_sock_dir = ref None
 let db_max_conns = ref 10
-let port = ref 44444
+let port = ref 61613
 let debug = ref false
 let initdb = ref false
 let login = ref None
@@ -27,7 +27,7 @@ let params =
       "-dbuser", set_some_string db_user, "USER Database user.";
       "-dbpassword", set_some_string db_password, "PASSWORD Database password.";
       "-dbmaxconns", Arg.Set_int db_max_conns, "NUM Maximum size of DB connection pool.";
-      "-port", Arg.Set_int port, "PORT Port to listen at.";
+      "-port", Arg.Set_int port, "PORT Port to listen at (default: 61613).";
       "-login", set_some_string login, "LOGIN Login expected in CONNECT.";
       "-passcode", set_some_string passcode, "PASSCODE Passcode expected in CONNECT.";
       "-initdb", Arg.Set initdb, " Initialize the database (create required tables).";
