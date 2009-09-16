@@ -4,7 +4,8 @@ BYTE_ENABLED = true
 OCAMLOPTFLAGS = -S -inline 100
 USE_OCAMLFIND = true
 
-OCAMLFLAGS += -g -syntax camlp4o
+OCAMLCFLAGS += -g -annot
+OCAMLFLAGS += -syntax camlp4o
 OCAMLDEPFLAGS += -syntax camlp4o
 
 OCAMLPACKS[] =
