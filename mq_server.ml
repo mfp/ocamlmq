@@ -77,6 +77,9 @@ type broker = {
   b_passcode : string option;
 }
 
+DEFINE DEBUG(what_to_print) = if broker.b_debug then what_to_print
+let show fmt = eprintf (fmt ^^ "\n%!")
+
 let ignore_result ?(exn_handler = fun _ -> return ()) f x =
   ignore_result (try_lwt f x with e -> exn_handler e)
 
@@ -103,9 +106,8 @@ let terminate_connection broker conn =
 
   conn.conn_closed <- true;
 
-  if broker.b_debug then
-    eprintf "Connection %d terminated with %d pending ACKs\n%!"
-      conn.conn_id (List.length wakeners);
+  DEBUG(show "Connection %d terminated with %d pending ACKs."
+          conn.conn_id (List.length wakeners));
 
   (* remove from connection set and subscription lists *)
   broker.b_connections <- CONNS.remove conn broker.b_connections;
@@ -166,8 +168,7 @@ let find_recipient broker name =
 let have_recipient broker name = Option.is_some (find_recipient broker name)
 
 let rec send_to_recipient ~kind broker listeners conn subs queue msg =
-  if broker.b_debug then
-    eprintf "Sending %S to conn %d.\n%!" msg.msg_id conn.conn_id;
+  DEBUG(show "Sending %S to conn %d." msg.msg_id conn.conn_id);
   let sleep, wakeup = Lwt.task () in
   let msg_id = msg.msg_id in
     subs.qs_pending_acks <- subs.qs_pending_acks + 1;
@@ -200,8 +201,7 @@ let rec send_to_recipient ~kind broker listeners conn subs queue msg =
       return ()
     end >>
     begin
-      if broker.b_debug then
-        eprintf "ACKed %S by conn %d\n%!" msg_id conn.conn_id;
+      DEBUG(show "Conn %d ACKed %S." conn.conn_id msg_id);
       P.ack_msg broker.b_msg_store msg_id >>
       (* try to send older messages for the subscription whose message
        * we just ACKed *)
@@ -227,8 +227,7 @@ and send_saved_messages ?(only_once = false) broker queue =
 
 and handle_send_msg_exn broker ~queue conn ~msg_id = function
   | Lwt_unix.Timeout | Lwt.Canceled ->
-      if broker.b_debug then
-        eprintf "Timeout/Canceled on message %S.\n%!" msg_id;
+      DEBUG(show "Timeout/Canceled on message %S." msg_id);
       enqueue_after_timeout broker ~queue ~msg_id
   | _ -> terminate_connection broker conn >>
          enqueue_after_timeout broker ~queue ~msg_id
@@ -243,18 +242,16 @@ and enqueue_after_timeout broker ~queue ~msg_id =
         let msg_id = msg.msg_id in
         match find_recipient broker queue with
           | None -> begin (* move to main table *)
-              if broker.b_debug then
-                eprintf "No recipient for unACKed message %S, saving.\n%!" msg_id;
+              DEBUG(show "No recipient for unACKed message %S, saving." msg_id);
               P.unack_msg broker.b_msg_store msg_id >>
               send_saved_messages ~only_once:true broker queue
             end
           | Some (listeners, (conn, subs)) ->
-              eprintf "Found a recipient for unACKed message %S.\n%!" msg_id;
+              DEBUG(show "Found a recipient for unACKed message %S." msg_id);
               try_lwt
                 send_to_recipient ~kind:Ack_pending broker listeners conn subs queue msg
               with Lwt_unix.Timeout | Lwt.Canceled ->
-                if broker.b_debug then
-                  eprintf "Trying to enqueue unACKed message %S again.\n%!" msg_id;
+                DEBUG(show "Trying to enqueue unACKed message %S again." msg_id);
                 enqueue_after_timeout broker ~queue ~msg_id
 
 let rec send_to_queue broker queue msg =
@@ -278,6 +275,7 @@ let cmd_subscribe broker conn frame =
   try_lwt
     match STOMP.get_destination frame with
         Topic name -> begin
+          DEBUG(show "Conn %d subscribed to topic %S." conn.conn_id name);
           H.replace conn.conn_topics name ();
           try
             let conns = H.find broker.b_topics name in
@@ -288,6 +286,7 @@ let cmd_subscribe broker conn frame =
             return ()
         end
       | Queue name -> begin
+          DEBUG(show "Conn %d subscribed to queue %S." conn.conn_id name);
           let subscription =
             {
               qs_prefetch =
@@ -317,13 +316,18 @@ let cmd_subscribe broker conn frame =
 let cmd_unsubscribe broker conn frame =
   try
     match STOMP.get_destination frame with
-        Topic topic -> remove_topic_subs broker topic conn; return ()
-      | Queue queue -> remove_queue_subs broker queue conn; return ()
+        Topic topic ->
+          DEBUG(show "Conn %d unsubscribes from topic %S." conn.conn_id topic);
+          remove_topic_subs broker topic conn; return ()
+      | Queue queue ->
+          DEBUG(show "Conn %d unsubscribes from queue %S." conn.conn_id queue);
+          remove_queue_subs broker queue conn; return ()
   with Not_found ->
     STOMP.send_error ~eol:broker.b_frame_eol conn.conn_och
       "Invalid or missing destination: must be of the form /queue/xxx or /topic/xxx."
 
 let cmd_disconnect broker conn frame =
+  DEBUG(show "Disconnect by %d." conn.conn_id);
   Lwt_io.abort conn.conn_och >> fail End_of_file
 
 let cmd_send broker conn frame =
@@ -341,7 +345,9 @@ let cmd_send broker conn frame =
              float_of_string (STOMP.get_header frame "ack-timeout")
            with _ -> 0.)
       }
-    in match destination with
+    in DEBUG(show "Conn %d sending to %S."
+              conn.conn_id (string_of_destination destination));
+       match destination with
         Topic topic -> send_to_topic broker topic msg
       | Queue queue ->
           let save ?low_priority x =
@@ -414,7 +420,9 @@ let handle_connection broker conn =
     lwt frame = STOMP.read_stomp_frame ~eol:broker.b_frame_eol conn.conn_ich in
     handle_frame broker conn frame >>
     loop ()
-  in loop ()
+  in
+    DEBUG(show "New connection: %d" conn.conn_id);
+    loop ()
 
 let connect_error msg ich och =
   Lwt_io.write och msg >> Lwt_io.flush och >> Lwt_io.abort ich
@@ -460,12 +468,10 @@ let establish_connection broker fd addr =
                   (* give it time to process the last few acks *)
                   Lwt_unix.sleep 2. >> terminate_connection broker conn
               | e ->
-                  if broker.b_debug then begin
-                      eprintf "GOT EXCEPTION for conn %d: %s\n%!"
-                        conn.conn_id (Printexc.to_string e);
-                      eprintf "backtrace:\n%s" (Printexc.get_backtrace ());
-                      Printexc.print_backtrace stderr
-                  end;
+                  DEBUG(show "GOT EXCEPTION for conn %d: %s"
+                          conn.conn_id (Printexc.to_string e);
+                        show "backtrace:\n%s" (Printexc.get_backtrace ());
+                        Printexc.print_backtrace stderr);
                   Lwt_io.abort och >> terminate_connection broker conn
           end
       | _ -> connect_error "ERROR\n\nExpected CONNECT frame.\000\n" ich och
