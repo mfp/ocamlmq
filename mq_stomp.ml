@@ -11,6 +11,7 @@ type stomp_frame = {
 
 let topic_re = Str.regexp "/topic/"
 let queue_re = Str.regexp "/queue/"
+let control_re = Str.regexp "/control/"
 
 let get_destination frame =
   let destination = List.assoc "destination" frame.fr_headers in
@@ -18,6 +19,8 @@ let get_destination frame =
       Topic (String.slice ~first:7 destination)
     else if Str.string_match queue_re destination 0 then
       Queue (String.slice ~first:7 destination)
+    else if Str.string_match control_re destination 0 then
+      Control (String.slice ~first:9 destination)
     else raise Not_found
 
 let get_header frame name = List.assoc (String.lowercase name) frame.fr_headers
@@ -44,12 +47,12 @@ let write_stomp_frame ~eol och frame =
          Lwt_io.flush och)
       och
 
-let handle_receipt ~eol och frame =
+let handle_receipt ?(extra_headers=[]) ~eol och frame =
   try
     let receipt = List.assoc "receipt" frame.fr_headers in
       write_stomp_frame ~eol och
         { fr_command = "RECEIPT";
-          fr_headers = ["receipt-id", receipt];
+          fr_headers = ("receipt-id", receipt) :: extra_headers;
           fr_body = "" }
   with Not_found -> return ()
 

@@ -1,5 +1,6 @@
 open Printf
 open Lwt
+open ExtString
 
 module type PERSISTENCE =
 sig
@@ -280,10 +281,10 @@ let cmd_subscribe broker conn frame =
           try
             let conns = H.find broker.b_topics name in
               H.replace broker.b_topics name (CONNS.add conn conns);
-              return ()
+              return []
           with Not_found ->
             H.add broker.b_topics name (CONNS.singleton conn);
-            return ()
+            return []
         end
       | Queue name -> begin
           DEBUG(show "Conn %d subscribed to queue %S." conn.conn_id name);
@@ -307,28 +308,40 @@ let cmd_subscribe broker conn frame =
                  in H.add broker.b_queues name ls
              end;
              ignore_result (send_saved_messages broker) name;
-             return ()
+             return []
         end
+      | Control _ -> raise Not_found
   with Not_found ->
-    STOMP.send_error ~eol:broker.b_frame_eol conn.conn_och
-      "Invalid or missing destination: must be of the form /queue/xxx or /topic/xxx."
+    send_error broker conn
+      "Invalid or missing destination: must be of the form /queue/xxx or /topic/xxx." >>
+    return []
 
 let cmd_unsubscribe broker conn frame =
   try
     match STOMP.get_destination frame with
         Topic topic ->
           DEBUG(show "Conn %d unsubscribes from topic %S." conn.conn_id topic);
-          remove_topic_subs broker topic conn; return ()
+          remove_topic_subs broker topic conn; return []
       | Queue queue ->
           DEBUG(show "Conn %d unsubscribes from queue %S." conn.conn_id queue);
-          remove_queue_subs broker queue conn; return ()
+          remove_queue_subs broker queue conn; return []
+      | Control _ -> raise Not_found
   with Not_found ->
-    STOMP.send_error ~eol:broker.b_frame_eol conn.conn_och
-      "Invalid or missing destination: must be of the form /queue/xxx or /topic/xxx."
+    send_error broker conn
+      "Invalid or missing destination: must be of the form /queue/xxx or /topic/xxx." >>
+    return []
 
 let cmd_disconnect broker conn frame =
   DEBUG(show "Disconnect by %d." conn.conn_id);
   Lwt_io.abort conn.conn_och >> fail End_of_file
+
+let handle_control_message broker dst conn frame =
+  if Str.string_match (Str.regexp "count-msgs/") dst 0 then
+    let queue = String.slice ~first:11 dst in
+    lwt num_msgs = P.count_queue_msgs broker.b_msg_store queue in
+      return ["num-messages", Int64.to_string num_msgs]
+  else
+    return []
 
 let cmd_send broker conn frame =
   try_lwt
@@ -348,7 +361,7 @@ let cmd_send broker conn frame =
     in DEBUG(show "Conn %d sending to %S."
               conn.conn_id (string_of_destination destination));
        match destination with
-        Topic topic -> send_to_topic broker topic msg
+        Topic topic -> send_to_topic broker topic msg >> return []
       | Queue queue ->
           let save ?low_priority x =
             P.save_msg ?low_priority broker.b_msg_store x in
@@ -359,7 +372,7 @@ let cmd_send broker conn frame =
             then begin
               lwt () = save msg in
                 ignore_result (send_to_queue broker queue) msg;
-                return ()
+                return []
             end else begin
               broker.b_async_usedmem <- broker.b_async_usedmem + len;
               ignore_result
@@ -370,18 +383,20 @@ let cmd_send broker conn frame =
                      broker.b_async_usedmem <- broker.b_async_usedmem - len;
                      return ())
                 msg;
-              return ()
+              return []
             end
+      | Control dst -> handle_control_message broker dst conn frame
   with Not_found ->
-    STOMP.send_error ~eol:broker.b_frame_eol conn.conn_och
-      "Invalid or missing destination: must be of the form /queue/xxx or /topic/xxx."
+    send_error broker conn
+      "Invalid or missing destination: must be of the form /queue/xxx or /topic/xxx." >>
+    return []
 
 let cmd_ack broker conn frame =
   try_lwt
     let msg_id = STOMP.get_header frame "message-id" in
       wakeup (H.find conn.conn_pending_acks msg_id) ();
-      return ()
-  with Not_found -> return ()
+      return []
+  with Not_found -> return []
 
 let ignore_command broker conn frame = return ()
 
@@ -389,8 +404,8 @@ let command_handlers = H.create 13
 let register_command (name, f) = H.add command_handlers name f
 
 let with_receipt f broker conn frame =
-  f broker conn frame >>
-  STOMP.handle_receipt ~eol:broker.b_frame_eol conn.conn_och frame
+  lwt extra_headers = f broker conn frame in
+    STOMP.handle_receipt ~extra_headers ~eol:broker.b_frame_eol conn.conn_och frame
 
 let not_implemented broker conn frame =
   send_error broker conn "Not implemented: %s" frame.STOMP.fr_command

@@ -61,7 +61,7 @@ let do_save t dbh ?(ack_pending = false) msg =
                      $ack_timeout, $body)"
 
 let save_msg t ?(low_priority = false) msg = match msg.msg_destination with
-    Topic _ -> return ()
+    Topic _ | Control _ -> return ()
   | Queue queue ->
       if not low_priority then WithDB(do_save t dbh msg)
       else Lwt_pool.use t.dbconns' (fun dbh -> do_save t dbh msg)
