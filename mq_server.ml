@@ -251,7 +251,7 @@ and enqueue_after_timeout broker ~queue ~msg_id =
               DEBUG(show "Found a recipient for unACKed message %S." msg_id);
               try_lwt
                 send_to_recipient ~kind:Ack_pending broker listeners conn subs queue msg
-              with Lwt_unix.Timeout | Lwt.Canceled ->
+              with _ ->
                 DEBUG(show "Trying to enqueue unACKed message %S again." msg_id);
                 enqueue_after_timeout broker ~queue ~msg_id
 
