@@ -340,6 +340,18 @@ let handle_control_message broker dst conn frame =
     let queue = String.slice ~first:17 dst in
     lwt num_msgs = P.count_queue_msgs broker.b_msg_store queue in
       return ["num-messages", Int64.to_string num_msgs]
+  else if Str.string_match (Str.regexp "count-subscribers/queue/") dst 0 then
+    let queue = String.slice ~first:25 dst in
+    let num_subs =
+      try
+        let ls = H.find broker.b_queues queue in
+          SUBS.cardinal ls.l_ready + SUBS.cardinal ls.l_blocked
+      with _ -> 0
+    in return ["num-subscribers", string_of_int num_subs]
+  else if Str.string_match (Str.regexp "count-subscribers/topic/") dst 0 then
+    let topic = String.slice ~first:25 dst in
+    let num_subs = try CONNS.cardinal (H.find broker.b_topics topic) with _ -> 0 in
+      return ["num-subscribers", string_of_int num_subs]
   else
     return []
 
