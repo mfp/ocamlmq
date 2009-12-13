@@ -336,8 +336,8 @@ let cmd_disconnect broker conn frame =
   Lwt_io.abort conn.conn_och >> fail End_of_file
 
 let handle_control_message broker dst conn frame =
-  if Str.string_match (Str.regexp "count-msgs/") dst 0 then
-    let queue = String.slice ~first:11 dst in
+  if Str.string_match (Str.regexp "count-msgs/queue/") dst 0 then
+    let queue = String.slice ~first:17 dst in
     lwt num_msgs = P.count_queue_msgs broker.b_msg_store queue in
       return ["num-messages", Int64.to_string num_msgs]
   else
