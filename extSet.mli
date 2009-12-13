@@ -18,6 +18,7 @@ module Make_lean : functor (Ord : Set.OrderedType) ->
 sig
   type t
   val empty : t
+  val cardinal : t -> int
   val is_empty : t -> bool
   val singleton : Ord.t -> t
   val iter : (Ord.t -> unit) -> t -> unit

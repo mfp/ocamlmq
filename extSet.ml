@@ -27,6 +27,12 @@ struct
 
   let empty = Empty
 
+  let cardinal = function
+      Empty -> 0
+    | Single _ -> 1
+    | Array x -> Array.length x
+    | Set s -> S.cardinal s
+
   let is_empty s = match s with
       Empty -> true
     | Single _ -> false
