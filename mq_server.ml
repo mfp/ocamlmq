@@ -251,9 +251,9 @@ and enqueue_after_timeout broker ~queue ~msg_id =
               DEBUG(show "Found a recipient for unACKed message %S." msg_id);
               try_lwt
                 send_to_recipient ~kind:Ack_pending broker listeners conn subs queue msg
-              with _ ->
+              with e ->
                 DEBUG(show "Trying to enqueue unACKed message %S again." msg_id);
-                enqueue_after_timeout broker ~queue ~msg_id
+                handle_send_msg_exn broker ~queue conn ~msg_id e
 
 let rec send_to_queue broker queue msg =
   match find_recipient broker queue with
