@@ -24,4 +24,5 @@ sig
   val iter : (Ord.t -> unit) -> t -> unit
   val remove : Ord.t -> t -> t
   val add : Ord.t -> t -> t
+  val union : t -> t -> t
 end

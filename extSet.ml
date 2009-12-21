@@ -66,4 +66,12 @@ struct
         if Array.length a + 1 <= max_arr_size then Array (Array.append a [|x|])
         else Set (Array.fold_right S.add a (S.singleton x))
     | Set s -> Set (S.add x s)
+
+  let to_set =  function
+      Empty -> S.empty
+    | Single x -> S.singleton x
+    | Array a -> Array.fold_right S.add a S.empty
+    | Set s -> s
+
+  let union t1 t2 = Set (S.union (to_set t1) (to_set t2))
 end
