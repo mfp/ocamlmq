@@ -56,7 +56,8 @@ struct
         | a -> Array a
       end
     | Set s -> match S.remove x s with
-          s when S.cardinal s <= max_arr_size -> Array (Array.of_list (S.elements s))
+          s when S.is_empty s -> Empty
+        | s when S.cardinal s <= max_arr_size -> Array (Array.of_list (S.elements s))
         | s -> Set s
 
   let add x = function
@@ -73,5 +74,7 @@ struct
     | Array a -> Array.fold_right S.add a S.empty
     | Set s -> s
 
-  let union t1 t2 = Set (S.union (to_set t1) (to_set t2))
+  let union t1 t2 = match t1, t2 with
+      Empty, t | t, Empty -> t
+    | _ -> Set (S.union (to_set t1) (to_set t2))
 end
