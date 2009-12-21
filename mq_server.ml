@@ -136,22 +136,22 @@ let terminate_connection broker conn =
 let send_error broker conn fmt =
   STOMP.send_error ~eol:broker.b_frame_eol conn.conn_och fmt
 
+let matching_conns broker topic =
+  List.fold_left
+    CONNS.union
+    (try H.find broker.b_topics topic with Not_found -> CONNS.empty)
+    (TST.find_prefixes topic broker.b_prefix_topics)
+
 let send_to_topic broker topic msg =
   Lwt_unix.yield () >>
-  try
-    let conns =
-      List.fold_left
-        CONNS.union
-        (try H.find broker.b_topics topic with Not_found -> CONNS.empty)
-        (TST.find_prefixes topic broker.b_prefix_topics)
-    in
-      CONNS.iter
-        (fun conn ->
-           ignore_result
-             (STOMP.send_message ~eol:broker.b_frame_eol conn.conn_och) msg)
-        conns;
+  begin
+    CONNS.iter
+      (fun conn ->
+         ignore_result
+           (STOMP.send_message ~eol:broker.b_frame_eol conn.conn_och) msg)
+      (matching_conns broker topic);
     return ()
-  with Not_found -> return ()
+  end
 
 let is_subs_blocked_locally subs =
   subs.qs_prefetch > 0 && subs.qs_pending_acks >= subs.qs_prefetch
@@ -380,11 +380,8 @@ let handle_control_message broker dst conn frame =
     in return ["num-subscribers", string_of_int num_subs]
   else if Str.string_match (Str.regexp "count-subscribers/topic/") dst 0 then
     let topic = String.slice ~first:24 dst in
-    let s1 = try H.find broker.b_topics topic with Not_found -> CONNS.empty in
-    let num_subs = match TST.find_prefixes topic broker.b_prefix_topics with
-        [] -> CONNS.cardinal s1
-      | l -> CONNS.cardinal (List.fold_right CONNS.union l s1)
-    in return ["num-subscribers", string_of_int num_subs]
+    let num_subs = CONNS.cardinal (matching_conns broker topic) in
+      return ["num-subscribers", string_of_int num_subs]
   else
     return []
 
