@@ -380,9 +380,11 @@ let handle_control_message broker dst conn frame =
     in return ["num-subscribers", string_of_int num_subs]
   else if Str.string_match (Str.regexp "count-subscribers/topic/") dst 0 then
     let topic = String.slice ~first:24 dst in
-    (* TODO: also prefix matches *)
-    let num_subs = try CONNS.cardinal (H.find broker.b_topics topic) with _ -> 0 in
-      return ["num-subscribers", string_of_int num_subs]
+    let s1 = try H.find broker.b_topics topic with Not_found -> CONNS.empty in
+    let num_subs = match TST.find_prefixes topic broker.b_prefix_topics with
+        [] -> CONNS.cardinal s1
+      | l -> CONNS.cardinal (List.fold_right CONNS.union l s1)
+    in return ["num-subscribers", string_of_int num_subs]
   else
     return []
 
