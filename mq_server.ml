@@ -26,6 +26,7 @@ open Mq_types
 module STOMP = Mq_stomp
 module SSET = Set.Make(String)
 module H = Hashtbl
+module TST = Ternary
 
 type message_kind = Saved | Ack_pending
 
@@ -67,6 +68,7 @@ type broker = {
   mutable b_connections : CONNS.t;
   b_queues : (string, listeners) H.t;
   b_topics : (string, CONNS.t) H.t;
+  mutable b_prefix_topics : CONNS.t TST.t;
   b_socket : Lwt_unix.file_descr;
   b_frame_eol : bool;
   b_msg_store : P.t;
@@ -84,12 +86,25 @@ let show fmt = eprintf (fmt ^^ "\n%!")
 let ignore_result ?(exn_handler = fun _ -> return ()) f x =
   ignore_result (try_lwt f x with e -> exn_handler e)
 
+let is_prefix_topic topic =
+  let len = String.length topic in
+    len > 0 && topic.[len - 1] = '*'
+
 let remove_topic_subs broker topic conn =
   try
-    let conns = H.find broker.b_topics topic in
-      match CONNS.remove conn conns with
-          s when CONNS.is_empty s -> H.remove broker.b_topics topic
-        | s -> H.replace broker.b_topics topic s
+    if not (is_prefix_topic topic) then begin
+      let conns = H.find broker.b_topics topic in
+        match CONNS.remove conn conns with
+            s when CONNS.is_empty s -> H.remove broker.b_topics topic
+          | s -> H.replace broker.b_topics topic s
+    end else begin
+      let topic = String.slice ~last:(-1) topic in
+      let conns = TST.find topic broker.b_prefix_topics in
+      let t = match CONNS.remove conn conns with
+          s when CONNS.is_empty s -> TST.remove topic broker.b_prefix_topics
+        | s -> TST.add topic s broker.b_prefix_topics
+      in broker.b_prefix_topics <- t
+    end
   with Not_found -> ()
 
 let remove_queue_subs broker queue conn =
@@ -124,11 +139,17 @@ let send_error broker conn fmt =
 let send_to_topic broker topic msg =
   Lwt_unix.yield () >>
   try
-    CONNS.iter
-      (fun conn ->
-         ignore_result
-           (STOMP.send_message ~eol:broker.b_frame_eol conn.conn_och) msg)
-      (H.find broker.b_topics topic);
+    let conns =
+      List.fold_left
+        CONNS.union
+        (try H.find broker.b_topics topic with Not_found -> CONNS.empty)
+        (TST.find_prefixes topic broker.b_prefix_topics)
+    in
+      CONNS.iter
+        (fun conn ->
+           ignore_result
+             (STOMP.send_message ~eol:broker.b_frame_eol conn.conn_och) msg)
+        conns;
     return ()
   with Not_found -> return ()
 
@@ -278,13 +299,22 @@ let cmd_subscribe broker conn frame =
         Topic name -> begin
           DEBUG(show "Conn %d subscribed to topic %S." conn.conn_id name);
           H.replace conn.conn_topics name ();
-          try
-            let conns = H.find broker.b_topics name in
-              H.replace broker.b_topics name (CONNS.add conn conns);
+          if not (is_prefix_topic name) then begin
+            try
+              let conns = H.find broker.b_topics name in
+                H.replace broker.b_topics name (CONNS.add conn conns);
+                return []
+            with Not_found ->
+              H.add broker.b_topics name (CONNS.singleton conn);
               return []
-          with Not_found ->
-            H.add broker.b_topics name (CONNS.singleton conn);
-            return []
+          end else begin
+            let topic = String.slice ~last:(-1) name in
+            let conns =
+              try TST.find topic broker.b_prefix_topics with Not_found -> CONNS.empty
+            in
+              broker.b_prefix_topics <- TST.add topic (CONNS.add conn conns) broker.b_prefix_topics;
+              return []
+          end
         end
       | Queue name -> begin
           DEBUG(show "Conn %d subscribed to queue %S." conn.conn_id name);
@@ -350,6 +380,7 @@ let handle_control_message broker dst conn frame =
     in return ["num-subscribers", string_of_int num_subs]
   else if Str.string_match (Str.regexp "count-subscribers/topic/") dst 0 then
     let topic = String.slice ~first:24 dst in
+    (* TODO: also prefix matches *)
     let num_subs = try CONNS.cardinal (H.find broker.b_topics topic) with _ -> 0 in
       return ["num-subscribers", string_of_int num_subs]
   else
@@ -516,6 +547,7 @@ let make_broker
     b_connections = CONNS.empty;
     b_queues = H.create 13;
     b_topics = H.create 13;
+    b_prefix_topics = TST.empty;
     b_socket = sock;
     b_frame_eol = frame_eol;
     b_msg_store = msg_store;

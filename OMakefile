@@ -26,6 +26,7 @@ OBJECTS[] =
     pGOCaml_lwt
     mq_pg_persistence
     mq_server
+    ternary
     ocamlmq
 
 mq_schema.ml: schema.sql generate_prepared_statements.rb
