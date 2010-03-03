@@ -32,12 +32,20 @@ let stomp_frame_buf = Buffer.create 80
 let write_stomp_frame ~eol och frame =
   let b = stomp_frame_buf in
     Buffer.clear b;
-    bprintf b "%s\n" frame.fr_command;
+    Buffer.add_string b frame.fr_command;
+    Buffer.add_char b '\n';
     List.iter
-      (fun (k, v) -> if k <> "content-length" then bprintf b "%s: %s\n" k v)
+      (fun (k, v) -> if k <> "content-length" then begin
+         Buffer.add_string b k;
+         Buffer.add_string b ": ";
+         Buffer.add_string b v;
+         Buffer.add_char b '\n'
+       end)
       frame.fr_headers;
-    bprintf b "content-length: %d\n" (String.length frame.fr_body);
-    bprintf b "\n";
+    Buffer.add_string b "content-length: ";
+    Buffer.add_string b (string_of_int (String.length frame.fr_body));
+    Buffer.add_char b '\n';
+    Buffer.add_char b '\n';
     Lwt_io.atomic
       (fun och ->
          Lwt_io.write och (Buffer.contents b) >>
