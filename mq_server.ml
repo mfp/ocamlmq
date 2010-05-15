@@ -561,9 +561,15 @@ let make_broker
 let server_loop ?(debug = false) broker =
   let broker = { broker with b_debug = debug } in
   let rec loop () =
-    lwt (fd, addr) = Lwt_unix.accept broker.b_socket in
-      ignore_result (establish_connection broker fd) addr;
-      loop ()
+    (try_lwt
+      lwt (fd, addr) = Lwt_unix.accept broker.b_socket in
+        ignore_result (establish_connection broker fd) addr;
+        return ()
+     with e ->
+       eprintf "Got toplevel exception: %s\n%!" (Printexc.to_string e);
+       Printexc.print_backtrace stderr;
+       Lwt_unix.sleep 0.01) >>
+    loop ()
   in
     P.crash_recovery broker.b_msg_store >> loop ()
 end (* Make functor *)
