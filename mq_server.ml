@@ -147,6 +147,7 @@ let send_to_topic broker topic msg =
   begin
     CONNS.iter
       (fun conn ->
+         DEBUG(show "Sending topic msg(%S) to %d" topic conn.conn_id);
          ignore_result
            (STOMP.send_message ~eol:broker.b_frame_eol conn.conn_och) msg)
       (matching_conns broker topic);
