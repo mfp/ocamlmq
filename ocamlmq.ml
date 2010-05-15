@@ -37,6 +37,7 @@ let params =
 let usage_message = "Usage: ocamlmq [options]"
 
 let _ = Sys.set_signal Sys.sigpipe Sys.Signal_ignore
+let _ = Sys.set_signal Sys.sigint (Sys.Signal_handle (fun _ -> exit 0))
 
 module SERVER = Mq_server.Make(Mq_pg_persistence)
 
