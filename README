@@ -1,0 +1,145 @@
+
+ocamlmq is a STOMP message broker with features that make it especially
+suitable for implementing task queues and communication between subsystems:
+
+* persistent queues, scaling over arbitrarily large numbers of queues with
+  constant memory usage (i.e. supports millions of queues)
+* strong durability guarantees: messages are guaranteed to have been saved to
+  disk by the time the sender gets a message receipt
+* message priorities
+* per subscription prefetch limit for queue messages
+* error handling and ACK timeout: if a subscriber doesn't ACK a message
+  after a (message-specific) timeout, the message will be sent to another
+  subscriber. Messages are also resent automatically if a subscriber dies and
+  its connection expires.
+* topic subscriptions (messages broadcast to all subscribers) with
+  prefix matching
+* support for high numbers of subscriptions: millions of subscriptions
+  pose no problem
+* simple extensions within the STOMP protocol to report the number of messages
+  in a queue and the number of subscribers to a queue or topic
+
+ocamlmq is written in OCaml, in less than 1200 lines of code.  It is easy to
+extend and fairly efficient.  The server is abstracted over a storage backend;
+currently only PostgreSQL's is implemented (< 150 lines of code).
+
+Scalability
+===========
+
+ocamlmq has been designed to support millions of queues and topic
+subscriptions without undue memory usage.  This table summarizes the time
+complexity of some STOMP operations:
+
+                              time              
+      SEND to queue           O(log subscribers)
+      SEND to topic           O(subscribers)    
+      SUBSCRIBE to queue      O(log total subs) 
+      SUBSCRIBE to topic      O(log subscribers)
+      ACK                     O(1)              
+
+ocamlmq needs typically around 100 bytes per subscription, so 1 million
+subscriptions will not take much more than 100 MB of memory.  No extra memory
+is needed for queues, so you can use lots of them with no concerns for memory
+usage.
+
+Building
+========
+
+You'll need a working OCaml environment plus the following libraries:
+* Lwt
+* extlib
+* PGOCaml
+
+If you have omake, just do
+
+  $ omake
+
+Otherwise, run
+
+  $ sh build.sh
+
+Running
+=======
+
+ocamlmq's configuration is given via the command line:
+
+  $ ./ocamlmq -help
+  Usage: ocamlmq [options]
+    -dbhost HOST         Database server host.
+    -dbport HOST         Database server port.
+    -dbdatabase DATABASE Database name.
+    -dbsockdir DIR       Database UNIX domain socket dir.
+    -dbuser USER         Database user.
+    -dbpassword PASSWORD Database password.
+    -dbmaxconns NUM      Maximum size of DB connection pool.
+    -port PORT           Port to listen at (default: 61613).
+    -login LOGIN         Login expected in CONNECT.
+    -passcode PASSCODE   Passcode expected in CONNECT.
+    -initdb              Initialize the database (create required tables).
+    -debug               Write debug info to stderr.
+    -help                Display this list of options
+    --help               Display this list of options
+
+ocamlmq can create the required tables (currently, only one, named
+"ocamlmq_msgs") in the PostgreSQL table indicated with -dbdatabase (defaulting
+to one with the same name as the user) with the -initdb option, so you can try
+it with
+
+  $ ./ocamlmq -dbdatabase mydatabase -initdb
+
+which will listen on port 61613 by default. 
+
+STOMP protocol specifics 
+========================
+ocamlmq uses the STOMP protocol as specified in 
+
+  http://stomp.codehaus.org/Protocol
+
+and uses a trailing newline (after the NULL byte) to delimit frames.
+
+SEND
+----
+The ACK timeout period, after which queue messages are sent to another
+subscriber, can be specified in the "ack-timeout" header (as a float in
+seconds), e.g.
+
+    SEND
+    destination:/queue/test
+    ack-timeout:3.14
+
+    just testing
+    ^@
+
+
+SUBSCRIBE
+---------
+
+Clients can subscribe to topics (/topic/xxx) which have broadcast, non-durable
+semantics, or to queues (/queue/xxx), which are persistent. It is also
+possible to subscribe to all the topics matching a prefix, by using
+/topic/someprefix* as the destination.
+
+The prefetch limit (max. number of unacknowledged messages allowed by the
+server) can be specified in the "prefetch" header.
+
+BEGIN / COMMIT
+--------------
+They are not implemented, since they are ill-specified.
+
+Control messages
+================
+A client can send messages to special "control" destinations and obtain the
+response in the message receipt (iow., nothing is returned unless the
+"receipt" header is set):
+
+  /control/count-msgs/queue/name-of-the-queue
+    
+    returns the number of messages in the "num-messages" header
+
+  /control/count-subscribers/queue/name-of-the-queue
+
+    returns the number of suscribers in the "num-subscribers" header
+
+  /control/count-subscribers/topic/name-of-the-topic
+
+    returns the number of suscribers in the "num-subscribers" header
