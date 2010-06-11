@@ -1,3 +1,4 @@
+(* Copyright (c) 2010 Mauricio Fernández <mfp@acm.org> *)
 include PGOCaml_generic.Make(struct include Lwt include Lwt_chan end)
 
 let buf = Buffer.create 64000

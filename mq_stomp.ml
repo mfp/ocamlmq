@@ -1,3 +1,4 @@
+(* Copyright (c) 2010 Mauricio Fernández <mfp@acm.org> *)
 open Mq_types
 open Printf
 open Lwt

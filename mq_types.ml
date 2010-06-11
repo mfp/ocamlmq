@@ -1,3 +1,4 @@
+(* Copyright (c) 2010 Mauricio Fernández <mfp@acm.org> *)
 
 type destination = Queue of string | Topic of string | Control of string
 

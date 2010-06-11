@@ -1,3 +1,4 @@
+(* Copyright (c) 2010 Mauricio Fernández <mfp@acm.org> *)
 
 type 'a t = 
     E (* empty *)
