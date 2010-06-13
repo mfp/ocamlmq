@@ -495,9 +495,15 @@ let valid_credentials broker frame =
        true
   with Not_found | Exit -> false
 
-let establish_connection broker fd addr =
+let rec establish_connection broker fd addr =
   let ich = Lwt_io.of_fd Lwt_io.input fd in
   let och = Lwt_io.of_fd Lwt_io.output fd in
+    try_lwt
+      do_establish_connection broker addr ich och
+    finally
+      Lwt_io.abort och
+
+and do_establish_connection broker addr ich och =
   lwt frame = STOMP.read_stomp_frame ~eol:broker.b_frame_eol ich in
     match frame.STOMP.fr_command with
         "CONNECT" when not (valid_credentials broker frame) ->
