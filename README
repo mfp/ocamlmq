@@ -7,7 +7,7 @@ suitable for implementing task queues and communication between subsystems:
 * strong durability guarantees: messages are guaranteed to have been saved to
   disk by the time the sender gets a message receipt
 * message priorities
-* per subscription prefetch limit for queue messages
+* per-subscription prefetch limit for queue messages
 * error handling and ACK timeout: if a subscriber doesn't ACK a message
   after a (message-specific) timeout, the message will be sent to another
   subscriber. Messages are also resent automatically if a subscriber dies and
@@ -30,17 +30,40 @@ ocamlmq has been designed to support millions of queues and topic
 subscriptions without undue memory usage.  This table summarizes the time
 complexity of some STOMP operations:
 
-                              time              
       SEND to queue           O(log subscribers)
-      SEND to topic           O(subscribers)    
-      SUBSCRIBE to queue      O(log total subs) 
+      SEND to topic           O(subscribers + log (total subs))
+      SUBSCRIBE to queue      O(log (total subs))
       SUBSCRIBE to topic      O(log subscribers)
       ACK                     O(1)              
 
-ocamlmq needs typically around 100 bytes per subscription, so 1 million
-subscriptions will not take much more than 100 MB of memory.  No extra memory
+ocamlmq needs typically around 150 bytes per subscription, so 1 million
+subscriptions will not take much more than 150 MB of memory.  No extra memory
 is needed for queues, so you can use lots of them with no concerns for memory
 usage.
+
+
+Limitations
+===========
+
+ocamlmq works well in the intended use case (persistent queues and transient
+topic destinations, with possibly many queues and subscriptions), but it has
+some limitations which preclude its use in other domains:
+* ocamlmq is not designed to scale beyond several hundred / a few thousand
+  simultaneous connections (it will work, but performance will be affected)
+* there is no flow control for topic messages (in the intended use case, topic
+  messages are assumed to be relatively small and processed fast)
+* messages are limited to 16 MB on 32-bit platforms
+* the PostgreSQL storage backend can only persist a few thousand
+  messages per second (note that ocamlmq allows >50K/s persistent message
+  bursts in async mode)
+* ocamlmq does not support very high message rates (ocamlmq delivers only
+  ~20000 messages/second on a 3GHz AMD64 box)
+
+If you need complex routing rules, scalability to many thousand simultaneous
+connections or other _enterprise_ messaging features, you'll be better served
+by AMPQ or JMS brokers. ActiveMQ, in particular, is very configurable, so
+it'll most likely fit the bill if memory consumption and scaling to many
+subscriptions are not a concern.
 
 Building
 ========
