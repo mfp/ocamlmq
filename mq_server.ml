@@ -213,11 +213,10 @@ let rec send_to_recipient ~kind broker listeners conn subs queue msg =
     if not must_send then return () else
 
     STOMP.send_message ~eol:broker.b_frame_eol conn.conn_och msg >>
-    let threads = match msg.msg_ack_timeout with
-        dt when dt > 0. -> [ Lwt_unix.timeout dt; sleep ]
-      | _ -> [ sleep ] in
     begin try_lwt
-      Lwt.select threads
+      match msg.msg_ack_timeout with
+        dt when dt > 0. -> Lwt_unix.with_timeout dt (fun () -> sleep)
+      | _ -> sleep
     finally
       (* either ACKed or Timeout/Cancel, at any rate, no longer want the ACK *)
       H.remove conn.conn_pending_acks msg_id;
