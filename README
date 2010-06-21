@@ -73,6 +73,8 @@ You'll need a working OCaml environment plus the following libraries:
 * extlib
 * PGOCaml
 
+Additionally, ocamlmq requires PostgreSQL both at compile- and run-time.
+
 If you have omake, just do
 
   $ omake
@@ -80,6 +82,33 @@ If you have omake, just do
 Otherwise, run
 
   $ sh build.sh
+
+If the compilation fails with the following error
+
+    File "./mq_schema.ml", line 3, characters 21-327 (end at line 11, character 3):
+    Camlp4: Uncaught exception: Unix.Unix_error (20 | CstTag21, "connect", "")
+
+you will have to provide some information using env. variables so that PGOCaml
+can connect to the PostgreSQL server (PGOCaml does this to check statically
+that all the SQL statements are valid), e.g.:
+
+  PGHOST=localhost PGUSER=myself PGPASSWORD=myself omake --verbose
+
+  or
+
+  PGHOST=localhost PGUSER=myself PGPASSWORD=myself sh build.sh
+
+This is the full list of options recognized by PGOcaml:
+
+  PGHOST
+  PGPORT
+  PGUSER
+  PGPASSWORD
+  PGDATABASE
+  UNIX_DOMAIN_SOCKET_DIR
+
+A temporary table will be created in the database while ocamlmq is compiled;
+no permanent changes will be made.
 
 Running
 =======
