@@ -57,7 +57,7 @@ some limitations which preclude its use in other domains:
   messages per second (note that ocamlmq allows >50K/s persistent message
   bursts in async mode)
 * ocamlmq does not support very high message rates (ocamlmq delivers only
-  ~20000 messages/second on a 3GHz AMD64 box)
+  ~40K messages/second on a 3GHz AMD64 box)
 
 If you need complex routing rules, scalability to many thousand simultaneous
 connections or other _enterprise_ messaging features, you'll be better served
