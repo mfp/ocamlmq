@@ -295,7 +295,10 @@ let new_msg_id =
 let new_conn_id = let n = ref 0 in fun () -> incr n; !n
 
 let cmd_subscribe broker conn frame =
-  try_lwt
+  let ret extra_headers =
+    STOMP.handle_receipt ~extra_headers ~eol:broker.b_frame_eol conn.conn_och frame
+
+  in try_lwt
     match STOMP.get_destination frame with
         Topic name -> begin
           DEBUG(show "Conn %d subscribed to topic %S." conn.conn_id name);
@@ -304,17 +307,17 @@ let cmd_subscribe broker conn frame =
             try
               let conns = H.find broker.b_topics name in
                 H.replace broker.b_topics name (CONNS.add conn conns);
-                return []
+                ret []
             with Not_found ->
               H.add broker.b_topics name (CONNS.singleton conn);
-              return []
+              ret []
           end else begin
             let topic = String.slice ~last:(-1) name in
             let conns =
               try TST.find topic broker.b_prefix_topics with Not_found -> CONNS.empty
             in
               broker.b_prefix_topics <- TST.add topic (CONNS.add conn conns) broker.b_prefix_topics;
-              return []
+              ret []
           end
         end
       | Queue name -> begin
@@ -338,29 +341,31 @@ let cmd_subscribe broker conn frame =
                             l_last_sent = None }
                  in H.add broker.b_queues name ls
              end;
-             ignore_result (send_saved_messages broker) name;
-             return []
+             lwt () = ret [] in (* ACK before sending *)
+               ignore_result (send_saved_messages broker) name;
+               return ()
         end
       | Control _ -> raise Not_found
   with Not_found ->
     send_error broker conn
       "Invalid or missing destination: must be of the form /queue/xxx or /topic/xxx." >>
-    return []
+    ret []
 
 let cmd_unsubscribe broker conn frame =
-  try
+  let ret () =
+    STOMP.handle_receipt ~eol:broker.b_frame_eol conn.conn_och frame
+  in try
     match STOMP.get_destination frame with
         Topic topic ->
           DEBUG(show "Conn %d unsubscribes from topic %S." conn.conn_id topic);
-          remove_topic_subs broker topic conn; return []
+          remove_topic_subs broker topic conn; ret ()
       | Queue queue ->
           DEBUG(show "Conn %d unsubscribes from queue %S." conn.conn_id queue);
-          remove_queue_subs broker queue conn; return []
+          remove_queue_subs broker queue conn; ret ()
       | Control _ -> raise Not_found
   with Not_found ->
     send_error broker conn
-      "Invalid or missing destination: must be of the form /queue/xxx or /topic/xxx." >>
-    return []
+      "Invalid or missing destination: must be of the form /queue/xxx or /topic/xxx."
 
 let cmd_disconnect broker conn frame =
   DEBUG(show "Disconnect by %d." conn.conn_id);
@@ -387,7 +392,10 @@ let handle_control_message broker dst conn frame =
     return []
 
 let cmd_send broker conn frame =
-  try_lwt
+  let ret extra_headers =
+    STOMP.handle_receipt ~extra_headers ~eol:broker.b_frame_eol conn.conn_och frame
+
+  in try_lwt
     let destination = STOMP.get_destination frame in
     let msg =
       {
@@ -404,7 +412,7 @@ let cmd_send broker conn frame =
     in DEBUG(show "Conn %d sending to %S."
               conn.conn_id (string_of_destination destination));
        match destination with
-        Topic topic -> send_to_topic broker topic msg >> return []
+        Topic topic -> send_to_topic broker topic msg >> ret []
       | Queue queue ->
           let save ?low_priority x =
             P.save_msg ?low_priority broker.b_msg_store x in
@@ -414,41 +422,38 @@ let cmd_send broker conn frame =
                 List.mem_assoc "receipt" frame.STOMP.fr_headers)
             then begin
               lwt () = save msg in
+              lwt () = ret [] in
                 ignore_result (send_to_queue broker queue) msg;
-                return []
+                return ()
             end else begin
               broker.b_async_usedmem <- broker.b_async_usedmem + len;
-              ignore_result
-                (fun x ->
-                   try_lwt
-                     save ~low_priority:true x >> send_to_queue broker queue x
-                   finally
-                     broker.b_async_usedmem <- broker.b_async_usedmem - len;
-                     return ())
-                msg;
-              return []
+              lwt () = ret [] in
+                ignore_result
+                  (fun x ->
+                     try_lwt
+                       save ~low_priority:true x >> send_to_queue broker queue x
+                     finally
+                       broker.b_async_usedmem <- broker.b_async_usedmem - len;
+                       return ())
+                  msg;
+                return ()
             end
-      | Control dst -> handle_control_message broker dst conn frame
+      | Control dst -> handle_control_message broker dst conn frame >>= ret
   with Not_found ->
     send_error broker conn
-      "Invalid or missing destination: must be of the form /queue/xxx or /topic/xxx." >>
-    return []
+      "Invalid or missing destination: must be of the form /queue/xxx or /topic/xxx."
 
 let cmd_ack broker conn frame =
-  try_lwt
+  (try
     let msg_id = STOMP.get_header frame "message-id" in
       wakeup (H.find conn.conn_pending_acks msg_id) ();
-      return []
-  with Not_found -> return []
+   with Not_found -> ());
+  STOMP.handle_receipt ~eol:broker.b_frame_eol conn.conn_och frame
 
 let ignore_command broker conn frame = return ()
 
 let command_handlers = H.create 13
 let register_command (name, f) = H.add command_handlers name f
-
-let with_receipt f broker conn frame =
-  lwt extra_headers = f broker conn frame in
-    STOMP.handle_receipt ~extra_headers ~eol:broker.b_frame_eol conn.conn_och frame
 
 let not_implemented broker conn frame =
   send_error broker conn "Not implemented: %s" frame.STOMP.fr_command
@@ -456,11 +461,11 @@ let not_implemented broker conn frame =
 let () =
   List.iter register_command
     [
-      "SUBSCRIBE", with_receipt cmd_subscribe;
-      "UNSUBSCRIBE", with_receipt cmd_unsubscribe;
-      "SEND", with_receipt cmd_send;
+      "SUBSCRIBE", cmd_subscribe;
+      "UNSUBSCRIBE", cmd_unsubscribe;
+      "SEND", cmd_send;
       "DISCONNECT", cmd_disconnect;
-      "ACK", with_receipt cmd_ack;
+      "ACK", cmd_ack;
       "BEGIN", not_implemented;
       "COMMIT", not_implemented;
       "ABORT", not_implemented;
