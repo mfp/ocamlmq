@@ -4,35 +4,37 @@ BYTE_ENABLED = true
 OCAMLOPTFLAGS = -S -inline 100
 USE_OCAMLFIND = true
 
+.SUBDIRS: ocaml-sqlexpr
+
 OCAMLCFLAGS += -g -annot
-OCAMLFLAGS += -syntax camlp4o
-OCAMLDEPFLAGS += -syntax camlp4o
+OCAMLFINDFLAGS += -syntax camlp4o
+OCAMLINCLUDES += ocaml-sqlexpr
 
 OCAMLPACKS[] =
     lwt
     lwt.unix
     lwt.syntax
+    estring
     extlib
     unix
     str
-    pgocaml
-    pgocaml.syntax
+    sqlite3
     camlp4.macro
 
 OBJECTS[] =
     extSet
     mq_types
     mq_stomp
-    pGOCaml_lwt
-    mq_pg_persistence
     mq_server
+    ocaml-sqlexpr/sqlexpr_sqlite
+    mq_sqlite_persistence
     ternary
     ocamlmq
 
-mq_schema.ml: schema.sql generate_prepared_statements.rb
-        ruby generate_prepared_statements.rb create_db $< > $@
-
-.SCANNER: scan-ocaml-mq_pg_persistence.ml: mq_pg_persistence.ml mq_schema.ml
+section
+    OCAMLFINDFLAGS += -ppopt ocaml-sqlexpr/pa_sql.cmo
+    .SCANNER: scan-ocaml-%.ml: %.ml ocaml-sqlexpr/pa_sql.cmo
+    $(addsuffixes .cmi .cmx .cmo .o, mq_sqlite_persistence):
 
 OCamlProgram(ocamlmq, $(OBJECTS))
 

@@ -1,0 +1,3 @@
+[submodule "ocaml-sqlexpr"]
+	path = ocaml-sqlexpr
+	url = git://github.com/mfp/ocaml-sqlexpr.git
