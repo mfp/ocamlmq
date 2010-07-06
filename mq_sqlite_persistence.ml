@@ -19,9 +19,9 @@ let flush t =
     printf "Flushing %d messages to disk (%d ACK pending)\n%!"
       (Hashtbl.length t.in_mem_msgs) (SSET.cardinal t.ack_pending);
     Hashtbl.iter
-      (fun _ msg -> 
+      (fun _ msg ->
          execute db
-           sql"INSERT INTO ocamlmq_msgs
+           sqlc"INSERT INTO ocamlmq_msgs
                  (msg_id, priority, destination, timestamp,
                   ack_timeout, body)
                VALUES(%s, %d, %s, %f, %f, %S)"
@@ -29,7 +29,7 @@ let flush t =
            msg.msg_timestamp msg.msg_ack_timeout msg.msg_body)
       t.in_mem_msgs;
     SSET.iter
-      (execute db sql"INSERT INTO pending_acks(msg_id) VALUES(%s)")
+      (execute db sqlc"INSERT INTO pending_acks(msg_id) VALUES(%s)")
       t.ack_pending;
     Hashtbl.clear t.in_mem;
     Hashtbl.clear t.in_mem_msgs;
@@ -47,7 +47,7 @@ let make file =
                  return ());
     t
 
-let initialize t = 
+let initialize t =
   execute t.db sql"ATTACH \":memory:\" AS mem";
   execute t.db
     sql"CREATE TABLE IF NOT EXISTS ocamlmq_msgs(
@@ -85,10 +85,10 @@ let register_ack_pending_msg t msg_id =
       if not r then t.ack_pending <- SSET.add msg_id t.ack_pending;
       return (not r)
   else
-    match select t.db sql"SELECT @s{msg_id} FROM mem WHERE msg_id = %s" msg_id with
+    match select t.db sqlc"SELECT @s{msg_id} FROM mem WHERE msg_id = %s" msg_id with
         [x] -> return false
       | _ ->
-          execute t.db sql"INSERT INTO pending_acks(msg_id) VALUES(%s)" msg_id;
+          execute t.db sqlc"INSERT INTO pending_acks(msg_id) VALUES(%s)" msg_id;
           return true
 
 let msg_of_tuple (msg_id, dst, timestamp, priority, ack_timeout, body) =
@@ -108,7 +108,7 @@ let get_ack_pending_msg t msg_id =
   with Not_found ->
     match
       select t.db
-        sql"SELECT @s{msg_id}, @s{destination}, @f{timestamp}, 
+        sqlc"SELECT @s{msg_id}, @s{destination}, @f{timestamp},
                    @d{priority}, @f{ack_timeout}, @S{body}
               FROM ocamlmq_msgs AS msg
              WHERE msg_id = %s
@@ -127,8 +127,8 @@ let ack_msg t msg_id =
       let dst = destination_name msg.msg_destination in
         Hashtbl.replace t.in_mem dst (MSET.remove v (Hashtbl.find t.in_mem dst))
   end else begin
-    execute t.db sql"DELETE FROM ocamlmq_msgs WHERE msg_id = %s" msg_id;
-    execute t.db sql"DELETE FROM pending_acks WHERE msg_id = %s" msg_id;
+    execute t.db sqlc"DELETE FROM ocamlmq_msgs WHERE msg_id = %s" msg_id;
+    execute t.db sqlc"DELETE FROM pending_acks WHERE msg_id = %s" msg_id;
   end;
   return ()
 
@@ -136,7 +136,7 @@ let unack_msg t msg_id =
   if SSET.mem msg_id t.ack_pending then
     t.ack_pending <- SSET.remove msg_id t.ack_pending
   else
-    execute t.db sql"DELETE FROM pending_acks WHERE msg_id = %s" msg_id;
+    execute t.db sqlc"DELETE FROM pending_acks WHERE msg_id = %s" msg_id;
   return ()
 
 exception Msg of message
@@ -156,7 +156,7 @@ let get_msg_for_delivery t dest =
   with Not_found ->
     let tup =
       select t.db
-        sql"SELECT @s{msg_id}, @s{destination}, @f{timestamp}, 
+        sqlc"SELECT @s{msg_id}, @s{destination}, @f{timestamp},
                    @d{priority}, @f{ack_timeout}, @S{body}
               FROM ocamlmq_msgs as msg
              WHERE destination = %s
@@ -168,15 +168,15 @@ let get_msg_for_delivery t dest =
         [] -> return None
       | tup :: _ ->
           let msg = msg_of_tuple tup in
-          execute t.db sql"INSERT INTO pending_acks VALUES(%s)" msg.msg_id;
+          execute t.db sqlc"INSERT INTO pending_acks VALUES(%s)" msg.msg_id;
           return (Some msg)
 
 let count_queue_msgs t dest =
   let in_mem =
-    try MSET.cardinal (Hashtbl.find t.in_mem dest) with Not_found -> 0 in 
+    try MSET.cardinal (Hashtbl.find t.in_mem dest) with Not_found -> 0 in
   let in_db =
     match
-      select t.db sql"SELECT @L{COUNT(*)} FROM ocamlmq_msgs WHERE destination=%s"
+      select t.db sqlc"SELECT @L{COUNT(*)} FROM ocamlmq_msgs WHERE destination=%s"
         dest
     with [n] -> n
       | _ -> assert false
