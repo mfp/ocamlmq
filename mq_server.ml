@@ -167,10 +167,9 @@ let block_subscription listeners ((conn, subs) as c) =
   listeners.l_ready <- SUBS.remove c listeners.l_ready;
   listeners.l_blocked <- SUBS.add c listeners.l_blocked
 
-let unblock_some_listeners listeners =
-  let unblocked = select_unblocked_subs listeners.l_blocked in
-    listeners.l_ready <- SUBS.union listeners.l_ready unblocked;
-    listeners.l_blocked <- SUBS.diff listeners.l_blocked unblocked
+let unblock_subscription listeners ((conn, subs) as c) =
+  listeners.l_ready <- SUBS.add c listeners.l_ready;
+  listeners.l_blocked <- SUBS.remove c listeners.l_blocked
 
 let find_recipient broker name =
   try
@@ -179,14 +178,9 @@ let find_recipient broker name =
           None -> (* first msg sent, there can be no blocked client *)
             Some (ls, SUBS.min_elt ls.l_ready)
         | Some cursor ->
-            if SUBS.is_empty ls.l_ready then unblock_some_listeners ls;
-            match SUBS.next cursor ls.l_ready with
-              | (conn, _) when conn == fst (SUBS.min_elt ls.l_ready) ->
-                  (* went through all ready subscriptions, try to unblock some &
-                   * give it another try *)
-                  unblock_some_listeners ls;
-                  Some (ls, SUBS.next cursor ls.l_ready)
-              | c -> Some (ls, c)
+            if SUBS.is_empty ls.l_ready then None
+            else
+              Some (ls, SUBS.next cursor ls.l_ready)
   with Not_found -> None
 
 let have_recipient broker name = Option.is_some (find_recipient broker name)
@@ -221,6 +215,8 @@ let rec send_to_recipient ~kind broker listeners conn subs queue msg =
       (* either ACKed or Timeout/Cancel, at any rate, no longer want the ACK *)
       H.remove conn.conn_pending_acks msg_id;
       subs.qs_pending_acks <- subs.qs_pending_acks - 1;
+      if subs.qs_prefetch > 0 && subs.qs_pending_acks < subs.qs_prefetch then
+        unblock_subscription listeners (conn, subs);
       return ()
     end >>
     begin
