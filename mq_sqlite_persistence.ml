@@ -154,7 +154,8 @@ let ack_msg t msg_id =
         Hashtbl.replace t.in_mem dst (MSET.remove v (Hashtbl.find t.in_mem dst))
   end else begin
     execute t.db sqlc"INSERT INTO acked_msgs(msg_id) VALUES(%s)" msg_id;
-    t.acked <- SSET.add msg_id t.acked
+    t.acked <- SSET.add msg_id t.acked;
+    t.ack_pending <- SSET.remove msg_id t.ack_pending;
   end;
   return ()
 
