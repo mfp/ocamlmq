@@ -27,8 +27,9 @@ let msgs_acked_in_mem ?dst t =
        | None -> select t.db sqlc"SELECT @L{COUNT(*)} FROM acked_msgs")
 
 let flush t =
+  let t0 = Unix.gettimeofday () in
   transaction t.db begin fun db ->
-    printf "Flushing to disk: %d msgs, %d pending ACKS, %Ld ACKS\n%!"
+    printf "Flushing to disk: %d msgs, %d pending ACKS, %Ld ACKS%!"
       (Hashtbl.length t.in_mem_msgs)
       (SSET.cardinal t.ack_pending)
       (msgs_acked_in_mem t);
@@ -53,7 +54,8 @@ let flush t =
     Hashtbl.clear t.in_mem_msgs;
     t.ack_pending <- SSET.empty;
     t.acked <- SSET.empty;
-  end
+  end;
+  printf " (%8.5fs)\n%!" (Unix.gettimeofday () -. t0)
 
 let make file =
   let t =
