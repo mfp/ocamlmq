@@ -131,7 +131,7 @@ let terminate_connection broker conn =
   H.iter (fun topic _ -> remove_topic_subs broker topic conn) conn.conn_topics;
   H.iter (fun queue _ -> remove_queue_subs broker queue conn) conn.conn_queues;
   (* cancel all the waiters: they will re-queue the corresponding messages *)
-  List.iter (fun w -> wakeup_exn w Lwt.Canceled) wakeners;
+  List.iter (fun w -> try wakeup_exn w Lwt.Canceled with _ -> ()) wakeners;
   return ()
 
 let send_error broker conn fmt =
@@ -365,7 +365,9 @@ let cmd_unsubscribe broker conn frame =
 
 let cmd_disconnect broker conn frame =
   DEBUG(show "Disconnect by %d." conn.conn_id);
-  Lwt_io.abort conn.conn_och >> fail End_of_file
+  Lwt_io.abort conn.conn_och >>
+  terminate_connection broker conn >>
+  fail End_of_file
 
 let handle_control_message broker dst conn frame =
   if Str.string_match (Str.regexp "count-msgs/queue/") dst 0 then
