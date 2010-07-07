@@ -12,34 +12,54 @@ type t = {
   in_mem : (string, MSET.t) Hashtbl.t;
   in_mem_msgs : (string, message) Hashtbl.t;
   mutable ack_pending : SSET.t;
+  mutable acked : SSET.t;
 }
+
+let get_first = function [x] -> x | _ -> assert false
+
+let msgs_acked_in_mem ?dst t =
+  get_first
+    (match dst with
+         Some dst ->
+           select t.db
+             sqlc"SELECT @L{COUNT(*)} FROM acked_msgs WHERE destination=%s"
+             dst
+       | None -> select t.db sqlc"SELECT @L{COUNT(*)} FROM acked_msgs")
 
 let flush t =
   transaction t.db begin fun db ->
-    printf "Flushing %d messages to disk (%d ACK pending)\n%!"
-      (Hashtbl.length t.in_mem_msgs) (SSET.cardinal t.ack_pending);
+    printf "Flushing to disk: %d msgs, %d pending ACKS, %Ld ACKS\n%!"
+      (Hashtbl.length t.in_mem_msgs)
+      (SSET.cardinal t.ack_pending)
+      (msgs_acked_in_mem t);
     Hashtbl.iter
       (fun _ msg ->
-         execute db
-           sqlc"INSERT INTO ocamlmq_msgs
-                 (msg_id, priority, destination, timestamp,
-                  ack_timeout, body)
-               VALUES(%s, %d, %s, %f, %f, %S)"
-           msg.msg_id msg.msg_priority (destination_name msg.msg_destination)
-           msg.msg_timestamp msg.msg_ack_timeout msg.msg_body)
+         if not (SSET.mem msg.msg_id t.acked) then
+           execute db
+             sqlc"INSERT INTO ocamlmq_msgs
+                   (msg_id, priority, destination, timestamp,
+                    ack_timeout, body)
+                 VALUES(%s, %d, %s, %f, %f, %S)"
+             msg.msg_id msg.msg_priority (destination_name msg.msg_destination)
+             msg.msg_timestamp msg.msg_ack_timeout msg.msg_body)
       t.in_mem_msgs;
     SSET.iter
       (execute db sqlc"INSERT INTO pending_acks(msg_id) VALUES(%s)")
       t.ack_pending;
+    execute db
+      sqlc"DELETE FROM ocamlmq_msgs WHERE msg_id IN (SELECT * FROM acked_msgs)";
+    execute db sqlc"DELETE FROM acked_msgs";
     Hashtbl.clear t.in_mem;
     Hashtbl.clear t.in_mem_msgs;
     t.ack_pending <- SSET.empty;
+    t.acked <- SSET.empty;
   end
 
 let make file =
   let t =
     { db = open_db file; in_mem = Hashtbl.create 13;
-      in_mem_msgs = Hashtbl.create 13; ack_pending = SSET.empty; } in
+      in_mem_msgs = Hashtbl.create 13; ack_pending = SSET.empty;
+      acked = SSET.empty; } in
   let rec loop_flush () = Lwt_unix.sleep 1.0 >> (flush t; loop_flush ()) in
     Lwt.ignore_result
       (try_lwt loop_flush ()
@@ -63,6 +83,8 @@ let initialize t =
         ON ocamlmq_msgs(destination, priority, timestamp)";
   execute t.db
     sql"CREATE TABLE mem.pending_acks(msg_id VARCHAR(255) NOT NULL PRIMARY KEY)";
+  execute t.db
+    sql"CREATE TABLE mem.acked_msgs(msg_id VARCHAR(255) NOT NULL PRIMARY KEY)";
   return ()
 
 let save_msg t ?low_priority msg =
@@ -112,7 +134,8 @@ let get_ack_pending_msg t msg_id =
                    @d{priority}, @f{ack_timeout}, @S{body}
               FROM ocamlmq_msgs AS msg
              WHERE msg_id = %s
-               AND EXISTS (SELECT 1 FROM pending_acks WHERE msg_id = msg.msg_id)"
+               AND EXISTS (SELECT 1 FROM pending_acks WHERE msg_id = msg.msg_id)
+               AND NOT EXISTS (SELECT 1 FROM acked_msgs WHERE msg_id = msg.msg_id)"
         msg_id
     with
         [] -> return None
@@ -127,8 +150,8 @@ let ack_msg t msg_id =
       let dst = destination_name msg.msg_destination in
         Hashtbl.replace t.in_mem dst (MSET.remove v (Hashtbl.find t.in_mem dst))
   end else begin
-    execute t.db sqlc"DELETE FROM ocamlmq_msgs WHERE msg_id = %s" msg_id;
-    execute t.db sqlc"DELETE FROM pending_acks WHERE msg_id = %s" msg_id;
+    execute t.db sqlc"INSERT INTO acked_msgs(msg_id) VALUES(%s)" msg_id;
+    t.acked <- SSET.add msg_id t.acked
   end;
   return ()
 
@@ -161,6 +184,7 @@ let get_msg_for_delivery t dest =
               FROM ocamlmq_msgs as msg
              WHERE destination = %s
                AND NOT EXISTS (SELECT 1 FROM pending_acks WHERE msg_id = msg.msg_id)
+               AND NOT EXISTS (SELECT 1 FROM acked_msgs WHERE msg_id = msg.msg_id)
           ORDER BY priority, timestamp
              LIMIT 1 "
         dest
@@ -171,15 +195,15 @@ let get_msg_for_delivery t dest =
           execute t.db sqlc"INSERT INTO pending_acks VALUES(%s)" msg.msg_id;
           return (Some msg)
 
-let count_queue_msgs t dest =
+let count_queue_msgs t dst =
   let in_mem =
-    try MSET.cardinal (Hashtbl.find t.in_mem dest) with Not_found -> 0 in
+    try MSET.cardinal (Hashtbl.find t.in_mem dst) with Not_found -> 0 in
   let in_db =
-    match
-      select t.db sqlc"SELECT @L{COUNT(*)} FROM ocamlmq_msgs WHERE destination=%s"
-        dest
-    with [n] -> n
-      | _ -> assert false
-  in return (Int64.add (Int64.of_int in_mem) in_db)
+    get_first
+      (select t.db
+        sqlc"SELECT @L{COUNT(*)} FROM ocamlmq_msgs WHERE destination=%s"
+        dst) in
+  let in_db_acked = msgs_acked_in_mem ~dst t in
+    return (Int64.sub (Int64.add (Int64.of_int in_mem) in_db) in_db_acked)
 
 let crash_recovery t = return ()
