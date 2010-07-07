@@ -35,14 +35,15 @@ let flush t =
       (msgs_acked_in_mem t);
     Hashtbl.iter
       (fun _ msg ->
-         if not (SSET.mem msg.msg_id t.acked) then
-           execute db
-             sqlc"INSERT INTO ocamlmq_msgs
-                   (msg_id, priority, destination, timestamp,
-                    ack_timeout, body)
-                 VALUES(%s, %d, %s, %f, %f, %S)"
-             msg.msg_id msg.msg_priority (destination_name msg.msg_destination)
-             msg.msg_timestamp msg.msg_ack_timeout msg.msg_body)
+         (* need not check it's not in t.acked, since the invariant is
+          * maintained in [ack_msg] *)
+         execute db
+           sqlc"INSERT INTO ocamlmq_msgs
+                 (msg_id, priority, destination, timestamp,
+                  ack_timeout, body)
+               VALUES(%s, %d, %s, %f, %f, %S)"
+           msg.msg_id msg.msg_priority (destination_name msg.msg_destination)
+           msg.msg_timestamp msg.msg_ack_timeout msg.msg_body)
       t.in_mem_msgs;
     SSET.iter
       (execute db sqlc"INSERT INTO pending_acks(msg_id) VALUES(%s)")
