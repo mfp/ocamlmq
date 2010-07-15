@@ -15,6 +15,8 @@ type t = {
   in_mem_msgs : (string, message) Hashtbl.t;
   mutable ack_pending : SSET.t;
   mutable acked : SSET.t;
+  mutable flush_alarm : unit Lwt.u;
+  max_msgs_in_mem : int;
 }
 
 let get_first = function [x] -> x | _ -> assert false
@@ -60,14 +62,25 @@ let flush t =
   end;
   printf " (%8.5fs)\n%!" (Unix.gettimeofday () -. t0)
 
-let make file =
+let make ?(max_msgs_in_mem = max_int) file =
+  let wait_flush, awaken_flush = Lwt.wait () in
   let t =
     { db = Sqlexpr_sqlite.open_db file; in_mem = Hashtbl.create 13;
       in_mem_msgs = Hashtbl.create 13; ack_pending = SSET.empty;
-      acked = SSET.empty; } in
-  let rec loop_flush () = Lwt_unix.sleep 1.0 >> (flush t; loop_flush ()) in
+      acked = SSET.empty; flush_alarm = awaken_flush;
+      max_msgs_in_mem = max_msgs_in_mem;
+    } in
+  let rec loop_flush wait_flush =
+    Lwt.choose [Lwt_unix.sleep 1.0; wait_flush] >>
+    begin
+      let wait, awaken = Lwt.wait () in
+        flush t;
+        t.flush_alarm <- awaken;
+        loop_flush wait
+    end
+  in
     Lwt.ignore_result
-      (try_lwt loop_flush ()
+      (try_lwt loop_flush wait_flush
        with e -> printf "EXCEPTION IN FLUSHER: %s\n%!" (Printexc.to_string e);
                  return ());
     t
@@ -100,6 +113,8 @@ let save_msg t ?low_priority msg =
     with Not_found -> Hashtbl.add t.in_mem dest (MSET.singleton v )
   end;
   Hashtbl.add t.in_mem_msgs msg.msg_id msg;
+  if Hashtbl.length t.in_mem_msgs > t.max_msgs_in_mem then
+    Lwt.wakeup t.flush_alarm ();
   return ()
 
 let register_ack_pending_new_msg t msg =
