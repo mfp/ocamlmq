@@ -10,6 +10,7 @@ let debug = ref false
 let login = ref None
 let passcode = ref None
 let db = ref None
+let max_in_mem = ref 100000
 
 let params =
   Arg.align
@@ -17,6 +18,8 @@ let params =
       "-port", Arg.Set_int port, "PORT Port to listen at (default: 61613).";
       "-login", set_some_string login, "LOGIN Login expected in CONNECT.";
       "-passcode", set_some_string passcode, "PASSCODE Passcode expected in CONNECT.";
+      "-maxmsgs", Arg.Set_int max_in_mem,
+        "N Flush to disk when there are more than N msgs in mem (default: 100000)";
       "-debug", Arg.Set debug, " Write debug info to stderr.";
     ]
 
@@ -39,7 +42,9 @@ let () =
   let addr = Unix.ADDR_INET (Unix.inet_addr_any, !port) in
     Lwt_unix.run begin
       let msg_store =
-        Mq_sqlite_persistence.make (Option.default "ocamlmq.db" !db)
+        Mq_sqlite_persistence.make
+          ~max_msgs_in_mem:!max_in_mem
+          (Option.default "ocamlmq.db" !db)
       in
         if !debug then eprintf "Connected to database.\n%!";
         eprintf "Initializing database.\n%!";
