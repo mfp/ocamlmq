@@ -9,6 +9,7 @@ USE_OCAMLFIND = true
 OCAMLCFLAGS += -g -annot
 OCAMLFINDFLAGS += -syntax camlp4o
 OCAMLINCLUDES += ocaml-sqlexpr
+OCAML_LIBS[] += ocaml-sqlexpr/sqlexpr
 
 OCAMLPACKS[] =
     lwt
@@ -26,7 +27,6 @@ OBJECTS[] =
     mq_types
     mq_stomp
     mq_server
-    ocaml-sqlexpr/sqlexpr_sqlite
     mq_sqlite_persistence
     ternary
     ocamlmq

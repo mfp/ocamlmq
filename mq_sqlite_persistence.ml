@@ -2,13 +2,15 @@
 open Lwt
 open Printf
 open Mq_types
-open Sqlexpr_sqlite
+
+module Sqlexpr = Sqlexpr_sqlite.Make(Sqlexpr_concurrency.Id)
+open Sqlexpr
 
 module MSET = Set.Make(struct type t = int * message let compare = compare end)
 module SSET = Set.Make(String)
 
 type t = {
-  db : db;
+  db : Sqlexpr_sqlite.db;
   in_mem : (string, MSET.t) Hashtbl.t;
   in_mem_msgs : (string, message) Hashtbl.t;
   mutable ack_pending : SSET.t;
@@ -60,7 +62,7 @@ let flush t =
 
 let make file =
   let t =
-    { db = open_db file; in_mem = Hashtbl.create 13;
+    { db = Sqlexpr_sqlite.open_db file; in_mem = Hashtbl.create 13;
       in_mem_msgs = Hashtbl.create 13; ack_pending = SSET.empty;
       acked = SSET.empty; } in
   let rec loop_flush () = Lwt_unix.sleep 1.0 >> (flush t; loop_flush ()) in
