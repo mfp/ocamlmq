@@ -62,7 +62,7 @@ let flush t =
   end;
   printf " (%8.5fs)\n%!" (Unix.gettimeofday () -. t0)
 
-let make ?(max_msgs_in_mem = max_int) file =
+let make ?(max_msgs_in_mem = max_int) ?(flush_period = 1.0) file =
   let wait_flush, awaken_flush = Lwt.wait () in
   let t =
     { db = Sqlexpr_sqlite.open_db file; in_mem = Hashtbl.create 13;
@@ -70,8 +70,9 @@ let make ?(max_msgs_in_mem = max_int) file =
       acked = SSET.empty; flush_alarm = awaken_flush;
       max_msgs_in_mem = max_msgs_in_mem;
     } in
+  let flush_period = max flush_period 0.005 in
   let rec loop_flush wait_flush =
-    Lwt.choose [Lwt_unix.sleep 1.0; wait_flush] >>
+    Lwt.choose [Lwt_unix.sleep flush_period; wait_flush] >>
     begin
       let wait, awaken = Lwt.wait () in
         flush t;
