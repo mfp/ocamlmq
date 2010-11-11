@@ -11,7 +11,7 @@ module SSET = Set.Make(String)
 
 type t = {
   db : Sqlexpr_sqlite.db;
-  in_mem : (string, MSET.t) Hashtbl.t;
+  in_mem : (string, MSET.t * SSET.t) Hashtbl.t;
   in_mem_msgs : (string, message) Hashtbl.t;
   mutable ack_pending : SSET.t;
   mutable acked : SSET.t;
@@ -105,21 +105,33 @@ let initialize t =
     sql"CREATE TABLE mem.acked_msgs(msg_id VARCHAR(255) NOT NULL PRIMARY KEY)";
   return ()
 
-let save_msg t ?low_priority msg =
+let do_save_msg t sent msg =
   let dest = destination_name msg.msg_destination in
   let v = (msg.msg_priority, msg) in
   begin
-    try Hashtbl.replace t.in_mem dest (MSET.add v (Hashtbl.find t.in_mem dest));
-    with Not_found -> Hashtbl.add t.in_mem dest (MSET.singleton v )
+    try
+      let unsent, want_ack = Hashtbl.find t.in_mem dest in
+      let p =
+        if sent then (unsent, SSET.add msg.msg_id want_ack)
+        else (MSET.add v unsent, want_ack)
+      in Hashtbl.replace t.in_mem dest p
+    with Not_found ->
+      let p =
+        if sent then (MSET.empty, SSET.singleton msg.msg_id)
+        else (MSET.singleton v, SSET.empty)
+      in Hashtbl.add t.in_mem dest p
   end;
   Hashtbl.add t.in_mem_msgs msg.msg_id msg;
   if Hashtbl.length t.in_mem_msgs > t.max_msgs_in_mem then
     Lwt.wakeup t.flush_alarm ();
   return ()
 
+let save_msg t ?low_priority msg =
+  do_save_msg t false msg
+
 let register_ack_pending_new_msg t msg =
   t.ack_pending <- SSET.add msg.msg_id t.ack_pending;
-  save_msg t msg
+  do_save_msg t true msg
 
 let register_ack_pending_msg t msg_id =
   if Hashtbl.mem t.in_mem_msgs msg_id then
@@ -166,9 +178,9 @@ let ack_msg t msg_id =
     let msg = Hashtbl.find t.in_mem_msgs msg_id in
       Hashtbl.remove t.in_mem_msgs msg_id;
       t.ack_pending <- SSET.remove msg_id t.ack_pending;
-      let v = (msg.msg_priority, msg) in
       let dst = destination_name msg.msg_destination in
-        Hashtbl.replace t.in_mem dst (MSET.remove v (Hashtbl.find t.in_mem dst))
+      let unsent, want_ack = Hashtbl.find t.in_mem dst in
+        Hashtbl.replace t.in_mem dst (unsent, SSET.remove msg_id want_ack)
   end else begin
     execute t.db sqlc"INSERT INTO acked_msgs(msg_id) VALUES(%s)" msg_id;
     t.acked <- SSET.add msg_id t.acked;
@@ -187,16 +199,12 @@ exception Msg of message
 
 let get_msg_for_delivery t dest =
   try
-    let set = Hashtbl.find t.in_mem dest in
-      try
-        MSET.iter
-          (fun (_, msg) ->
-             if not (SSET.mem msg.msg_id t.ack_pending) then raise (Msg msg))
-          set;
-        raise Not_found
-      with Msg msg ->
-        t.ack_pending <- SSET.add msg.msg_id t.ack_pending;
-        return (Some msg)
+    let unsent, want_ack = Hashtbl.find t.in_mem dest in
+    let ((prio, msg) as v) = MSET.min_elt unsent in
+      t.ack_pending <- SSET.add msg.msg_id t.ack_pending;
+      Hashtbl.replace t.in_mem dest
+        (MSET.remove v unsent, SSET.add msg.msg_id want_ack);
+      return (Some msg)
   with Not_found ->
     let tup =
       select t.db
@@ -218,7 +226,10 @@ let get_msg_for_delivery t dest =
 
 let count_queue_msgs t dst =
   let in_mem =
-    try MSET.cardinal (Hashtbl.find t.in_mem dst) with Not_found -> 0 in
+    try
+      let unsent, want_ack = Hashtbl.find t.in_mem dst in
+        MSET.cardinal unsent + SSET.cardinal want_ack
+    with Not_found -> 0 in
   let in_db =
     get_first
       (select t.db
