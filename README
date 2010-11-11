@@ -21,7 +21,9 @@ suitable for implementing task queues and communication between subsystems:
 
 ocamlmq is written in OCaml, in less than 1200 lines of code.  It is easy to
 extend and fairly efficient.  The server is abstracted over a storage backend;
-currently only PostgreSQL's is implemented (< 150 lines of code).
+there are currently two backends:
+* PostgreSQL's (150 LoC)
+* sqlite with in-mem caching (250 LoC)
 
 Scalability
 ===========
@@ -71,75 +73,30 @@ Building
 You'll need a working OCaml environment plus the following libraries:
 * Lwt
 * extlib
-* PGOCaml
+* ocaml-sqlite3
+* csv
+* estring
 
 Additionally, ocamlmq requires PostgreSQL both at compile- and run-time.
 
-If you have omake, just do
+Just do
 
   $ omake
-
-Otherwise, run
-
-  $ sh build.sh
-
-If the compilation fails with the following error
-
-    File "./mq_schema.ml", line 3, characters 21-327 (end at line 11, character 3):
-    Camlp4: Uncaught exception: Unix.Unix_error (20 | CstTag21, "connect", "")
-
-you will have to provide some information using env. variables so that PGOCaml
-can connect to the PostgreSQL server (PGOCaml does this to check statically
-that all the SQL statements are valid), e.g.:
-
-  PGHOST=localhost PGUSER=myself PGPASSWORD=myself omake --verbose
-
-  or
-
-  PGHOST=localhost PGUSER=myself PGPASSWORD=myself sh build.sh
-
-This is the full list of options recognized by PGOcaml:
-
-  PGHOST
-  PGPORT
-  PGUSER
-  PGPASSWORD
-  PGDATABASE
-  UNIX_DOMAIN_SOCKET_DIR
-
-A temporary table will be created in the database while ocamlmq is compiled;
-no permanent changes will be made.
 
 Running
 =======
 
 ocamlmq's configuration is given via the command line:
 
-  $ ./ocamlmq -help
-  Usage: ocamlmq [options]
-    -dbhost HOST         Database server host.
-    -dbport HOST         Database server port.
-    -dbdatabase DATABASE Database name.
-    -dbsockdir DIR       Database UNIX domain socket dir.
-    -dbuser USER         Database user.
-    -dbpassword PASSWORD Database password.
-    -dbmaxconns NUM      Maximum size of DB connection pool.
-    -port PORT           Port to listen at (default: 61613).
-    -login LOGIN         Login expected in CONNECT.
-    -passcode PASSCODE   Passcode expected in CONNECT.
-    -initdb              Initialize the database (create required tables).
-    -debug               Write debug info to stderr.
-    -help                Display this list of options
-    --help               Display this list of options
-
-ocamlmq can create the required tables (currently, only one, named
-"ocamlmq_msgs") in the PostgreSQL table indicated with -dbdatabase (defaulting
-to one with the same name as the user) with the -initdb option, so you can try
-it with
-
-  $ ./ocamlmq -dbdatabase mydatabase -initdb
-
-which will listen on port 61613 by default. 
+Usage: ocamlmq [options] [sqlite3 database (default: ocamlmq.db)]
+  -port PORT         Port to listen at (default: 61613).
+  -login LOGIN       Login expected in CONNECT.
+  -passcode PASSCODE Passcode expected in CONNECT.
+  -maxmsgs N         Flush to disk when there are more than N msgs in mem (default: 100000)
+  -flush-period DT   Flush period in seconds (default: 1.0)
+  -debug             Write debug info to stderr.
+  -help              Display this list of options
+  --help             Display this list of options
 
 STOMP protocol specifics 
 ========================
