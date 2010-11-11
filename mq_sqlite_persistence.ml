@@ -6,7 +6,13 @@ open Mq_types
 module Sqlexpr = Sqlexpr_sqlite.Make(Sqlexpr_concurrency.Id)
 open Sqlexpr
 
-module MSET = Set.Make(struct type t = int * message let compare = compare end)
+module MSET = Set.Make(struct
+                         type t = int * message
+                         let compare ((p1, m1) : t) (p2, m2) =
+                           if p2 = p1 then
+                             String.compare m1.msg_id m2.msg_id
+                           else p2 - p1
+                       end)
 module SSET = Set.Make(String)
 
 type t = {
