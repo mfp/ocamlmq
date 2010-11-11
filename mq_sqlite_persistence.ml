@@ -173,7 +173,8 @@ let get_ack_pending_msg t msg_id =
               FROM ocamlmq_msgs AS msg
              WHERE msg_id = %s
                AND EXISTS (SELECT 1 FROM pending_acks WHERE msg_id = msg.msg_id)
-               AND NOT EXISTS (SELECT 1 FROM acked_msgs WHERE msg_id = msg.msg_id)"
+               AND NOT EXISTS (SELECT 1 FROM acked_msgs WHERE msg_id = msg.msg_id)
+             LIMIT 1"
         msg_id
     with
         [] -> return None
