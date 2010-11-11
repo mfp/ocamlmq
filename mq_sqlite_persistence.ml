@@ -24,8 +24,6 @@ type t = {
   max_msgs_in_mem : int;
 }
 
-let get_first = function [x] -> x | _ -> assert false
-
 let flush_acked_msgs db =
   execute db
     sqlc"DELETE FROM ocamlmq_msgs WHERE msg_id IN (SELECT * FROM acked_msgs)";
@@ -242,12 +240,11 @@ let count_queue_msgs t dst =
         MSET.cardinal unsent + SSET.cardinal want_ack
     with Not_found -> 0 in
   let in_db =
-    get_first
-      (select t.db
-        sqlc"SELECT @L{COUNT(*)} FROM ocamlmq_msgs as msg
-              WHERE destination=%s
-                AND NOT EXISTS (SELECT 1 FROM acked_msgs WHERE msg_id = msg.msg_id)"
-        dst)
+    select_one t.db
+      sqlc"SELECT @L{COUNT(*)} FROM ocamlmq_msgs as msg
+            WHERE destination=%s
+              AND NOT EXISTS (SELECT 1 FROM acked_msgs WHERE msg_id = msg.msg_id)"
+      dst
   in
     return (Int64.add (Int64.of_int in_mem) in_db)
 
