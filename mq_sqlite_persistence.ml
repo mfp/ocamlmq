@@ -20,7 +20,6 @@ type t = {
   in_mem : (string, MSET.t * SSET.t) Hashtbl.t;
   in_mem_msgs : (string, message) Hashtbl.t;
   mutable ack_pending : SSET.t;
-  mutable acked : SSET.t;
   mutable flush_alarm : unit Lwt.u;
   max_msgs_in_mem : int;
 }
@@ -50,8 +49,6 @@ let flush t =
       (msgs_acked_in_mem t);
     Hashtbl.iter
       (fun _ msg ->
-         (* need not check it's not in t.acked, since the invariant is
-          * maintained in [ack_msg] *)
          execute db
            sqlc"INSERT INTO ocamlmq_msgs
                  (msg_id, priority, destination, timestamp,
@@ -67,7 +64,6 @@ let flush t =
     Hashtbl.clear t.in_mem;
     Hashtbl.clear t.in_mem_msgs;
     t.ack_pending <- SSET.empty;
-    t.acked <- SSET.empty;
   end;
   printf " (%8.5fs)\n%!" (Unix.gettimeofday () -. t0)
 
@@ -76,7 +72,7 @@ let make ?(max_msgs_in_mem = max_int) ?(flush_period = 1.0) file =
   let t =
     { db = Sqlexpr_sqlite.open_db file; in_mem = Hashtbl.create 13;
       in_mem_msgs = Hashtbl.create 13; ack_pending = SSET.empty;
-      acked = SSET.empty; flush_alarm = awaken_flush;
+      flush_alarm = awaken_flush;
       max_msgs_in_mem = max_msgs_in_mem;
     } in
   let flush_period = max flush_period 0.005 in
@@ -197,7 +193,6 @@ let ack_msg t msg_id =
         Hashtbl.replace t.in_mem dst (unsent, SSET.remove msg_id want_ack)
   end else begin
     execute t.db sqlc"INSERT INTO acked_msgs(msg_id) VALUES(%s)" msg_id;
-    t.acked <- SSET.add msg_id t.acked;
     t.ack_pending <- SSET.remove msg_id t.ack_pending;
     if select_one t.db sqlc"SELECT @d{COUNT(*)} FROM acked_msgs" > 100 then
       transaction t.db flush_acked_msgs;
