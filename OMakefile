@@ -12,6 +12,7 @@ OCAMLINCLUDES += ocaml-sqlexpr
 OCAML_LIBS[] += ocaml-sqlexpr/sqlexpr
 
 OCAMLPACKS[] =
+    csv
     lwt
     lwt.unix
     lwt.syntax
