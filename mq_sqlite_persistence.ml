@@ -36,6 +36,11 @@ let msgs_acked_in_mem ?dst t =
              dst
        | None -> select t.db sqlc"SELECT @L{COUNT(*)} FROM acked_msgs")
 
+let flush_acked_msgs db =
+  execute db
+    sqlc"DELETE FROM ocamlmq_msgs WHERE msg_id IN (SELECT * FROM acked_msgs)";
+  execute db sqlc"DELETE FROM acked_msgs"
+
 let flush t =
   let t0 = Unix.gettimeofday () in
   transaction t.db begin fun db ->
@@ -58,9 +63,7 @@ let flush t =
     SSET.iter
       (execute db sqlc"INSERT INTO pending_acks(msg_id) VALUES(%s)")
       t.ack_pending;
-    execute db
-      sqlc"DELETE FROM ocamlmq_msgs WHERE msg_id IN (SELECT * FROM acked_msgs)";
-    execute db sqlc"DELETE FROM acked_msgs";
+    flush_acked_msgs db;
     Hashtbl.clear t.in_mem;
     Hashtbl.clear t.in_mem_msgs;
     t.ack_pending <- SSET.empty;
@@ -192,6 +195,8 @@ let ack_msg t msg_id =
     execute t.db sqlc"INSERT INTO acked_msgs(msg_id) VALUES(%s)" msg_id;
     t.acked <- SSET.add msg_id t.acked;
     t.ack_pending <- SSET.remove msg_id t.ack_pending;
+    if select_one t.db sqlc"SELECT @d{COUNT(*)} FROM acked_msgs" > 100 then
+      transaction t.db flush_acked_msgs;
   end;
   return ()
 
