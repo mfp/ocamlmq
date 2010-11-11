@@ -148,7 +148,10 @@ let register_ack_pending_msg t msg_id =
       end;
       return (not r)
   else
-    match select t.db sqlc"SELECT @s{msg_id} FROM mem WHERE msg_id = %s" msg_id with
+    match
+      select t.db
+        sqlc"SELECT @s{msg_id} FROM pending_acks WHERE msg_id = %s LIMIT 1" msg_id
+    with
         [x] -> return false
       | _ ->
           execute t.db sqlc"INSERT INTO pending_acks(msg_id) VALUES(%s)" msg_id;
