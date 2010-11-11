@@ -142,7 +142,14 @@ let save_msg t ?low_priority msg =
 let register_ack_pending_msg t msg_id =
   if Hashtbl.mem t.in_mem_msgs msg_id then
     let r = SSET.mem msg_id t.ack_pending in
-      if not r then t.ack_pending <- SSET.add msg_id t.ack_pending;
+      if not r then begin
+        let msg = Hashtbl.find t.in_mem_msgs msg_id in
+        let dest = destination_name msg.msg_destination in
+        let unsent, want_ack = Hashtbl.find t.in_mem dest in
+        let v = (msg.msg_priority, msg) in
+          t.ack_pending <- SSET.add msg_id t.ack_pending;
+          Hashtbl.replace t.in_mem dest (MSET.remove v unsent, SSET.add msg_id want_ack)
+      end;
       return (not r)
   else
     match select t.db sqlc"SELECT @s{msg_id} FROM mem WHERE msg_id = %s" msg_id with
@@ -198,9 +205,15 @@ let ack_msg t msg_id =
   return ()
 
 let unack_msg t msg_id =
-  if SSET.mem msg_id t.ack_pending then
-    t.ack_pending <- SSET.remove msg_id t.ack_pending
-  else
+  if SSET.mem msg_id t.ack_pending then begin
+    t.ack_pending <- SSET.remove msg_id t.ack_pending;
+    let msg = Hashtbl.find t.in_mem_msgs msg_id in
+    let dst = destination_name msg.msg_destination in
+    let msg = Hashtbl.find t.in_mem_msgs msg_id in
+    let unsent, want_ack = Hashtbl.find t.in_mem dst in
+    let v = (msg.msg_priority, msg) in
+      Hashtbl.replace t.in_mem dst (MSET.add v unsent, SSET.remove msg_id want_ack)
+  end else
     execute t.db sqlc"DELETE FROM pending_acks WHERE msg_id = %s" msg_id;
   return ()
 
