@@ -575,6 +575,7 @@ let server_loop ?(debug = false) broker =
   let rec loop () =
     (try_lwt
       lwt (fd, addr) = Lwt_unix.accept broker.b_socket in
+        Lwt_unix.setsockopt fd Unix.TCP_NODELAY true;
         ignore_result (establish_connection broker fd) addr;
         return ()
      with e ->
