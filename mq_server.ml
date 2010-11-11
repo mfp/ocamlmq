@@ -9,7 +9,6 @@ sig
 
   val initialize : t -> unit Lwt.t
   val save_msg : t -> ?low_priority:bool -> Mq_types.message -> unit Lwt.t
-  val register_ack_pending_new_msg : t -> Mq_types.message -> unit Lwt.t
   (** Returns [false] if the msg was already in the ACK-pending set. *)
   val register_ack_pending_msg : t -> string -> bool Lwt.t
   val get_ack_pending_msg : t -> string -> Mq_types.message option Lwt.t

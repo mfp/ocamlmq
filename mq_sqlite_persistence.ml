@@ -139,10 +139,6 @@ let do_save_msg t sent msg =
 let save_msg t ?low_priority msg =
   do_save_msg t false msg
 
-let register_ack_pending_new_msg t msg =
-  t.ack_pending <- SSET.add msg.msg_id t.ack_pending;
-  do_save_msg t true msg
-
 let register_ack_pending_msg t msg_id =
   if Hashtbl.mem t.in_mem_msgs msg_id then
     let r = SSET.mem msg_id t.ack_pending in
