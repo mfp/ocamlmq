@@ -34,18 +34,28 @@ let count_acked_messages db =
 let pr fmt = ksprintf (eprintf "%s%!") fmt
 let puts fmt = ksprintf prerr_endline fmt
 
+let timed verbose gen_msg f =
+  let t0 = Unix.gettimeofday () in
+    if verbose then pr "%s" (gen_msg ());
+    let y = f () in
+      if verbose then puts " (%8.5fs)" (Unix.gettimeofday () -. t0);
+      y
+
 let flush_acked_msgs ?(verbose = false) db =
-  if verbose then puts "Flushing %Ld ACK" (count_acked_messages db);
-  execute db
-    sqlc"DELETE FROM ocamlmq_msgs WHERE msg_id IN (SELECT * FROM acked_msgs)";
-  execute db sqlc"DELETE FROM acked_msgs"
+  timed verbose (fun () -> sprintf "Flushing %Ld ACKs" (count_acked_messages db))
+    (fun () ->
+       execute db
+         sqlc"DELETE FROM ocamlmq_msgs WHERE msg_id IN (SELECT * FROM acked_msgs)";
+       execute db sqlc"DELETE FROM acked_msgs")
 
 let materialize_pending_acks ?(verbose = false) db =
-  if verbose then
-    puts "Materializing %Ld pending ACKs in DB" (count_unmaterialized_pending_acks db);
-  execute db sqlc"UPDATE ocamlmq_msgs SET ack_pending = 1
-                   WHERE msg_id IN (SELECT msg_id FROM pending_acks)";
-  execute db sqlc"DELETE FROM pending_acks"
+  timed verbose
+    (fun () -> sprintf "Materializing %Ld pending ACKs in DB"
+                 (count_unmaterialized_pending_acks db))
+    (fun () ->
+       execute db sqlc"UPDATE ocamlmq_msgs SET ack_pending = 1
+                        WHERE msg_id IN (SELECT msg_id FROM pending_acks)";
+       execute db sqlc"DELETE FROM pending_acks")
 
 let rec flush t =
   let t0 = Unix.gettimeofday () in
