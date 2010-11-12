@@ -186,11 +186,11 @@ let register_ack_pending_msg t msg_id =
       return (not r)
   else
     match
-      select t.db
-        sqlc"SELECT @s{msg_id} FROM pending_acks WHERE msg_id = %s LIMIT 1" msg_id
+      select_one_maybe t.db
+        sqlc"SELECT @b{1} FROM pending_acks WHERE msg_id = %s" msg_id
     with
-        [x] -> return false
-      | _ ->
+        Some _ -> return false
+      | None ->
           if msg_materialized_as_ack_pending t.db msg_id then
             return false
           else begin
@@ -211,24 +211,20 @@ let msg_of_tuple (msg_id, dst, timestamp, priority, ack_timeout, body) =
   }
 
 let get_ack_pending_msg t msg_id =
-  try
+  return begin try
     let msg = Hashtbl.find t.in_mem_msgs msg_id in
-      return (if SSET.mem msg_id t.ack_pending then Some msg else None)
+      if SSET.mem msg_id t.ack_pending then Some msg else None
   with Not_found ->
-    match
-      select t.db
-        sqlc"SELECT @s{msg_id}, @s{destination}, @f{timestamp},
-                   @d{priority}, @f{ack_timeout}, @S{body}
-              FROM ocamlmq_msgs AS msg
-             WHERE msg_id = %s
-               AND (msg.ack_pending OR
-                    EXISTS (SELECT 1 FROM pending_acks WHERE msg_id = msg.msg_id))
-               AND NOT EXISTS (SELECT 1 FROM acked_msgs WHERE msg_id = msg.msg_id)
-             LIMIT 1"
-        msg_id
-    with
-        [] -> return None
-      | msg :: _ -> return (Some (msg_of_tuple msg))
+    select_one_f_maybe t.db msg_of_tuple
+      sqlc"SELECT @s{msg_id}, @s{destination}, @f{timestamp},
+                 @d{priority}, @f{ack_timeout}, @S{body}
+            FROM ocamlmq_msgs AS msg
+           WHERE msg_id = %s
+             AND (msg.ack_pending OR
+                  EXISTS (SELECT 1 FROM pending_acks WHERE msg_id = msg.msg_id))
+             AND NOT EXISTS (SELECT 1 FROM acked_msgs WHERE msg_id = msg.msg_id)"
+      msg_id
+  end
 
 let ack_msg t msg_id =
   if SSET.mem msg_id t.ack_pending then begin
@@ -271,8 +267,8 @@ let get_msg_for_delivery t dest =
         (MSET.remove v unsent, SSET.add msg.msg_id want_ack);
       return (Some msg)
   with Not_found ->
-    let tup =
-      select t.db
+    match
+      select_one_f_maybe t.db msg_of_tuple
         sqlc"SELECT @s{msg_id}, @s{destination}, @f{timestamp},
                    @d{priority}, @f{ack_timeout}, @S{body}
               FROM ocamlmq_msgs as msg
@@ -280,13 +276,11 @@ let get_msg_for_delivery t dest =
                AND msg.ack_pending = 0
                AND NOT EXISTS (SELECT 1 FROM pending_acks WHERE msg_id = msg.msg_id)
                AND NOT EXISTS (SELECT 1 FROM acked_msgs WHERE msg_id = msg.msg_id)
-          ORDER BY priority, timestamp
-             LIMIT 1 "
+          ORDER BY priority, timestamp"
         dest
-    in match tup with
-        [] -> return None
-      | tup :: _ ->
-          let msg = msg_of_tuple tup in
+    with
+        None -> return None
+      | Some msg ->
           execute t.db sqlc"INSERT INTO pending_acks VALUES(%s)" msg.msg_id;
           if count_unmaterialized_pending_acks t.db > 100L then
             transaction t.db (materialize_pending_acks ~verbose:true);
