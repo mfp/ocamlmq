@@ -24,25 +24,37 @@ type t = {
   max_msgs_in_mem : int;
 }
 
-let flush_acked_msgs db =
+let flush_acked_msgs ?(verbose = false) db =
+  if verbose then
+    printf "Flushing %Ld ACKs\n%!"
+      (select_one db sqlc"SELECT @L{COUNT(*)} FROM acked_msgs");
   execute db
     sqlc"DELETE FROM ocamlmq_msgs WHERE msg_id IN (SELECT * FROM acked_msgs)";
   execute db sqlc"DELETE FROM acked_msgs"
 
+let materialize_pending_acks ?(verbose = false) db =
+  if verbose then
+    printf "Materializing %Ld pending ACKs in DB\n%!"
+      (select_one db sqlc"SELECT @L{COUNT(*)} FROM pending_acks");
+  execute db sqlc"UPDATE ocamlmq_msgs SET ack_pending = 1
+                   WHERE msg_id IN (SELECT msg_id FROM pending_acks)";
+  execute db sqlc"DELETE FROM pending_acks"
+
 let flush t =
   let t0 = Unix.gettimeofday () in
   transaction t.db begin fun db ->
-    printf "Flushing to disk: %d msgs, %d pending ACKS, %Ld ACKS%!"
+    printf "Flushing to disk: %d msgs, %d + %Ld pending ACKS, %Ld ACKS%!"
       (Hashtbl.length t.in_mem_msgs)
       (SSET.cardinal t.ack_pending)
+      (select_one t.db sqlc"SELECT @L{COUNT(*)} FROM pending_acks")
       (select_one t.db sqlc"SELECT @L{COUNT(*)} FROM acked_msgs");
     Hashtbl.iter
       (fun _ msg ->
          execute db
            sqlc"INSERT INTO ocamlmq_msgs
-                 (msg_id, priority, destination, timestamp,
+                 (ack_pending, msg_id, priority, destination, timestamp,
                   ack_timeout, body)
-               VALUES(%s, %d, %s, %f, %f, %S)"
+               VALUES(0, %s, %d, %s, %f, %f, %S)"
            msg.msg_id msg.msg_priority (destination_name msg.msg_destination)
            msg.msg_timestamp msg.msg_ack_timeout msg.msg_body)
       t.in_mem_msgs;
@@ -50,6 +62,7 @@ let flush t =
       (execute db sqlc"INSERT INTO pending_acks(msg_id) VALUES(%s)")
       t.ack_pending;
     flush_acked_msgs db;
+    materialize_pending_acks db;
     Hashtbl.clear t.in_mem;
     Hashtbl.clear t.in_mem_msgs;
     t.ack_pending <- SSET.empty;
@@ -84,6 +97,7 @@ let initialize t =
   execute t.db sqlinit"ATTACH \":memory:\" AS mem";
   execute t.db
     sqlinit"CREATE TABLE IF NOT EXISTS ocamlmq_msgs(
+              ack_pending BOOL NOT NULL,
               msg_id VARCHAR(255) NOT NULL PRIMARY KEY,
               priority INT NOT NULL,
               destination VARCHAR(255) NOT NULL,
@@ -94,7 +108,7 @@ let initialize t =
   execute t.db
     sqlinit"CREATE INDEX IF NOT EXISTS
             ocamlmq_msgs_destination_priority_timestamp
-            ON ocamlmq_msgs(destination, priority, timestamp)";
+            ON ocamlmq_msgs(destination, ack_pending, priority, timestamp)";
   execute t.db
     sqlinit"CREATE TABLE mem.pending_acks(msg_id VARCHAR(255) NOT NULL PRIMARY KEY)";
   execute t.db
@@ -144,8 +158,19 @@ let register_ack_pending_msg t msg_id =
     with
         [x] -> return false
       | _ ->
-          execute t.db sqlc"INSERT INTO pending_acks(msg_id) VALUES(%s)" msg_id;
-          return true
+          if select_one t.db
+              sqlc"SELECT @b{EXISTS (SELECT 1 FROM ocamlmq_msgs
+                                      WHERE msg_id = %s AND ack_pending)}"
+              msg_id
+          then
+            return false
+          else begin
+            execute t.db sqlc"INSERT INTO pending_acks(msg_id) VALUES(%s)" msg_id;
+            let count_pending_acks = sqlc"SELECT @d{COUNT(*)} FROM pending_acks" in
+              if select_one t.db count_pending_acks > 100 then
+                transaction t.db (materialize_pending_acks ~verbose:true);
+              return true
+          end
 
 let msg_of_tuple (msg_id, dst, timestamp, priority, ack_timeout, body) =
   {
@@ -168,7 +193,8 @@ let get_ack_pending_msg t msg_id =
                    @d{priority}, @f{ack_timeout}, @S{body}
               FROM ocamlmq_msgs AS msg
              WHERE msg_id = %s
-               AND EXISTS (SELECT 1 FROM pending_acks WHERE msg_id = msg.msg_id)
+               AND (msg.ack_pending OR
+                    EXISTS (SELECT 1 FROM pending_acks WHERE msg_id = msg.msg_id))
                AND NOT EXISTS (SELECT 1 FROM acked_msgs WHERE msg_id = msg.msg_id)
              LIMIT 1"
         msg_id
@@ -188,7 +214,7 @@ let ack_msg t msg_id =
     execute t.db sqlc"INSERT INTO acked_msgs(msg_id) VALUES(%s)" msg_id;
     t.ack_pending <- SSET.remove msg_id t.ack_pending;
     if select_one t.db sqlc"SELECT @d{COUNT(*)} FROM acked_msgs" > 100 then
-      transaction t.db flush_acked_msgs;
+      transaction t.db (flush_acked_msgs ~verbose:true);
   end;
   return ()
 
@@ -201,8 +227,18 @@ let unack_msg t msg_id =
     let unsent, want_ack = Hashtbl.find t.in_mem dst in
     let v = (msg.msg_priority, msg) in
       Hashtbl.replace t.in_mem dst (MSET.add v unsent, SSET.remove msg_id want_ack)
-  end else
-    execute t.db sqlc"DELETE FROM pending_acks WHERE msg_id = %s" msg_id;
+  end else begin
+    transaction t.db
+      (fun db ->
+         execute db sqlc"DELETE FROM pending_acks WHERE msg_id = %s" msg_id;
+         if select_one db
+              sqlc"SELECT @b{EXISTS (SELECT 1 FROM ocamlmq_msgs
+                                      WHERE msg_id = %s AND ack_pending)}"
+              msg_id
+         then execute db
+                sqlc"UPDATE ocamlmq_msgs SET ack_pending = 0 WHERE msg_id = %s"
+                msg_id)
+  end;
   return ()
 
 exception Msg of message
@@ -222,6 +258,7 @@ let get_msg_for_delivery t dest =
                    @d{priority}, @f{ack_timeout}, @S{body}
               FROM ocamlmq_msgs as msg
              WHERE destination = %s
+               AND msg.ack_pending = 0
                AND NOT EXISTS (SELECT 1 FROM pending_acks WHERE msg_id = msg.msg_id)
                AND NOT EXISTS (SELECT 1 FROM acked_msgs WHERE msg_id = msg.msg_id)
           ORDER BY priority, timestamp
@@ -249,6 +286,8 @@ let count_queue_msgs t dst =
   in
     return (Int64.add (Int64.of_int in_mem) in_db)
 
-let crash_recovery t = return ()
+let crash_recovery t =
+  execute t.db sqlc"UPDATE ocamlmq_msgs SET ack_pending = 0";
+  return ()
 
 let init_db, check_db, auto_check_db = sql_check"sqlite"
