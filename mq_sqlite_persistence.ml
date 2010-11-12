@@ -22,6 +22,7 @@ type t = {
   mutable ack_pending : SSET.t;
   mutable flush_alarm : unit Lwt.u;
   max_msgs_in_mem : int;
+  mutable unacks : SSET.t;
 }
 
 let count_unmaterialized_pending_acks db =
@@ -74,6 +75,19 @@ let flush t =
   end;
   printf " (%8.5fs)\n%!" (Unix.gettimeofday () -. t0)
 
+let msg_materialized_as_ack_pending db msg_id =
+  select_one db
+    sqlc"SELECT @b{EXISTS (SELECT 1 FROM ocamlmq_msgs
+                            WHERE msg_id = %s AND ack_pending)}"
+    msg_id
+
+let unack db msg_id =
+  execute db sqlc"DELETE FROM pending_acks WHERE msg_id = %s" msg_id;
+  if msg_materialized_as_ack_pending db msg_id then
+    execute db
+      sqlc"UPDATE ocamlmq_msgs SET ack_pending = 0 WHERE msg_id = %s"
+      msg_id
+
 let make ?(max_msgs_in_mem = max_int) ?(flush_period = 1.0) file =
   let wait_flush, awaken_flush = Lwt.wait () in
   let t =
@@ -81,6 +95,7 @@ let make ?(max_msgs_in_mem = max_int) ?(flush_period = 1.0) file =
       in_mem_msgs = Hashtbl.create 13; ack_pending = SSET.empty;
       flush_alarm = awaken_flush;
       max_msgs_in_mem = max_msgs_in_mem;
+      unacks = SSET.empty;
     } in
   let flush_period = max flush_period 0.005 in
   let rec loop_flush wait_flush =
@@ -90,11 +105,24 @@ let make ?(max_msgs_in_mem = max_int) ?(flush_period = 1.0) file =
         flush t;
         t.flush_alarm <- awaken;
         loop_flush wait
-    end
+    end in
+  let rec loop_flush_unacks () =
+    lwt () = Lwt_unix.sleep 0.1 in
+      if not (SSET.is_empty t.unacks) then
+        transaction t.db
+          (fun db ->
+             printf "UnACKing %d messages in DB\n%!" (SSET.cardinal t.unacks);
+             SSET.iter (unack db) t.unacks);
+      t.unacks <- SSET.empty;
+      loop_flush_unacks ()
   in
-    Lwt.ignore_result
+    ignore
       (try_lwt loop_flush wait_flush
        with e -> printf "EXCEPTION IN FLUSHER: %s\n%!" (Printexc.to_string e);
+                 return ());
+    ignore
+      (try_lwt loop_flush_unacks ()
+       with e -> printf "EXCEPTION IN UNACK FLUSHER: %s\n%!" (Printexc.to_string e);
                  return ());
     t
 
@@ -143,12 +171,6 @@ let do_save_msg t sent msg =
 
 let save_msg t ?low_priority msg =
   do_save_msg t false msg
-
-let msg_materialized_as_ack_pending db msg_id =
-  select_one db
-    sqlc"SELECT @b{EXISTS (SELECT 1 FROM ocamlmq_msgs
-                            WHERE msg_id = %s AND ack_pending)}"
-    msg_id
 
 let register_ack_pending_msg t msg_id =
   if Hashtbl.mem t.in_mem_msgs msg_id then
@@ -234,13 +256,7 @@ let unack_msg t msg_id =
     let v = (msg.msg_priority, msg) in
       Hashtbl.replace t.in_mem dst (MSET.add v unsent, SSET.remove msg_id want_ack)
   end else begin
-    transaction t.db
-      (fun db ->
-         execute db sqlc"DELETE FROM pending_acks WHERE msg_id = %s" msg_id;
-         if msg_materialized_as_ack_pending db msg_id then
-           execute db
-             sqlc"UPDATE ocamlmq_msgs SET ack_pending = 0 WHERE msg_id = %s"
-             msg_id)
+    t.unacks <- SSET.add msg_id t.unacks;
   end;
   return ()
 
