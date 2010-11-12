@@ -30,14 +30,19 @@ OBJECTS[] =
     mq_server
     mq_sqlite_persistence
     ternary
-    ocamlmq
 
 section
     OCAMLFINDFLAGS += -ppopt ocaml-sqlexpr/pa_sql.cmo
     .SCANNER: scan-ocaml-%.ml: %.ml ocaml-sqlexpr/pa_sql.cmo
     $(addsuffixes .cmi .cmx .cmo .o, mq_sqlite_persistence):
 
-OCamlProgram(ocamlmq, $(OBJECTS))
+OCamlProgram(ocamlmq, $(OBJECTS) ocamlmq)
+
+section
+    OCAMLPACKS[] += oUnit
+    TEST_FILES[] = $(removesuffix $(ls test*ml))
+    OCamlProgram(test, $(OBJECTS) $(TEST_FILES) test)
+    $(addsuffixes .cmi .cmo .cmx .o, $(TEST_FILES) test):
 
 .DEFAULT: ocamlmq$(EXE)
 

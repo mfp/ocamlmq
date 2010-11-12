@@ -81,23 +81,24 @@ let make ?(max_msgs_in_mem = max_int) ?(flush_period = 1.0) file =
     t
 
 let initialize t =
-  execute t.db sql"ATTACH \":memory:\" AS mem";
+  execute t.db sqlinit"ATTACH \":memory:\" AS mem";
   execute t.db
-    sql"CREATE TABLE IF NOT EXISTS ocamlmq_msgs(
-          msg_id VARCHAR(255) NOT NULL PRIMARY KEY,
-          priority INT NOT NULL,
-          destination VARCHAR(255) NOT NULL,
-          timestamp DOUBLE NOT NULL,
-          ack_timeout DOUBLE NOT NULL,
-          body BLOB NOT NULL)";
+    sqlinit"CREATE TABLE IF NOT EXISTS ocamlmq_msgs(
+              msg_id VARCHAR(255) NOT NULL PRIMARY KEY,
+              priority INT NOT NULL,
+              destination VARCHAR(255) NOT NULL,
+              timestamp DOUBLE NOT NULL,
+              ack_timeout DOUBLE NOT NULL,
+              body BLOB NOT NULL
+            )";
   execute t.db
-    sql"CREATE INDEX IF NOT EXISTS
-        ocamlmq_msgs_destination_priority_timestamp
-        ON ocamlmq_msgs(destination, priority, timestamp)";
+    sqlinit"CREATE INDEX IF NOT EXISTS
+            ocamlmq_msgs_destination_priority_timestamp
+            ON ocamlmq_msgs(destination, priority, timestamp)";
   execute t.db
-    sql"CREATE TABLE mem.pending_acks(msg_id VARCHAR(255) NOT NULL PRIMARY KEY)";
+    sqlinit"CREATE TABLE mem.pending_acks(msg_id VARCHAR(255) NOT NULL PRIMARY KEY)";
   execute t.db
-    sql"CREATE TABLE mem.acked_msgs(msg_id VARCHAR(255) NOT NULL PRIMARY KEY)";
+    sqlinit"CREATE TABLE mem.acked_msgs(msg_id VARCHAR(255) NOT NULL PRIMARY KEY)";
   return ()
 
 let do_save_msg t sent msg =
@@ -249,3 +250,5 @@ let count_queue_msgs t dst =
     return (Int64.add (Int64.of_int in_mem) in_db)
 
 let crash_recovery t = return ()
+
+let init_db, check_db, auto_check_db = sql_check"sqlite"
