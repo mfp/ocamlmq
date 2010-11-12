@@ -24,10 +24,15 @@ type t = {
   max_msgs_in_mem : int;
 }
 
+let count_unmaterialized_pending_acks db =
+  select_one db sqlc"SELECT @L{COUNT(*)} FROM pending_acks"
+
+let count_acked_messages db =
+  select_one db sqlc"SELECT @L{COUNT(*)} FROM acked_msgs"
+
 let flush_acked_msgs ?(verbose = false) db =
   if verbose then
-    printf "Flushing %Ld ACKs\n%!"
-      (select_one db sqlc"SELECT @L{COUNT(*)} FROM acked_msgs");
+    printf "Flushing %Ld ACKs\n%!" (count_acked_messages db);
   execute db
     sqlc"DELETE FROM ocamlmq_msgs WHERE msg_id IN (SELECT * FROM acked_msgs)";
   execute db sqlc"DELETE FROM acked_msgs"
@@ -35,7 +40,7 @@ let flush_acked_msgs ?(verbose = false) db =
 let materialize_pending_acks ?(verbose = false) db =
   if verbose then
     printf "Materializing %Ld pending ACKs in DB\n%!"
-      (select_one db sqlc"SELECT @L{COUNT(*)} FROM pending_acks");
+      (count_unmaterialized_pending_acks db);
   execute db sqlc"UPDATE ocamlmq_msgs SET ack_pending = 1
                    WHERE msg_id IN (SELECT msg_id FROM pending_acks)";
   execute db sqlc"DELETE FROM pending_acks"
@@ -46,8 +51,8 @@ let flush t =
     printf "Flushing to disk: %d msgs, %d + %Ld pending ACKS, %Ld ACKS%!"
       (Hashtbl.length t.in_mem_msgs)
       (SSET.cardinal t.ack_pending)
-      (select_one t.db sqlc"SELECT @L{COUNT(*)} FROM pending_acks")
-      (select_one t.db sqlc"SELECT @L{COUNT(*)} FROM acked_msgs");
+      (count_unmaterialized_pending_acks db)
+      (count_acked_messages db);
     Hashtbl.iter
       (fun _ msg ->
          execute db
@@ -139,6 +144,12 @@ let do_save_msg t sent msg =
 let save_msg t ?low_priority msg =
   do_save_msg t false msg
 
+let msg_materialized_as_ack_pending db msg_id =
+  select_one db
+    sqlc"SELECT @b{EXISTS (SELECT 1 FROM ocamlmq_msgs
+                            WHERE msg_id = %s AND ack_pending)}"
+    msg_id
+
 let register_ack_pending_msg t msg_id =
   if Hashtbl.mem t.in_mem_msgs msg_id then
     let r = SSET.mem msg_id t.ack_pending in
@@ -158,18 +169,13 @@ let register_ack_pending_msg t msg_id =
     with
         [x] -> return false
       | _ ->
-          if select_one t.db
-              sqlc"SELECT @b{EXISTS (SELECT 1 FROM ocamlmq_msgs
-                                      WHERE msg_id = %s AND ack_pending)}"
-              msg_id
-          then
+          if msg_materialized_as_ack_pending t.db msg_id then
             return false
           else begin
             execute t.db sqlc"INSERT INTO pending_acks(msg_id) VALUES(%s)" msg_id;
-            let count_pending_acks = sqlc"SELECT @d{COUNT(*)} FROM pending_acks" in
-              if select_one t.db count_pending_acks > 100 then
-                transaction t.db (materialize_pending_acks ~verbose:true);
-              return true
+            if count_unmaterialized_pending_acks t.db > 100L then
+              transaction t.db (materialize_pending_acks ~verbose:true);
+            return true
           end
 
 let msg_of_tuple (msg_id, dst, timestamp, priority, ack_timeout, body) =
@@ -213,7 +219,7 @@ let ack_msg t msg_id =
   end else begin
     execute t.db sqlc"INSERT INTO acked_msgs(msg_id) VALUES(%s)" msg_id;
     t.ack_pending <- SSET.remove msg_id t.ack_pending;
-    if select_one t.db sqlc"SELECT @d{COUNT(*)} FROM acked_msgs" > 100 then
+    if count_acked_messages t.db > 100L then
       transaction t.db (flush_acked_msgs ~verbose:true);
   end;
   return ()
@@ -231,13 +237,10 @@ let unack_msg t msg_id =
     transaction t.db
       (fun db ->
          execute db sqlc"DELETE FROM pending_acks WHERE msg_id = %s" msg_id;
-         if select_one db
-              sqlc"SELECT @b{EXISTS (SELECT 1 FROM ocamlmq_msgs
-                                      WHERE msg_id = %s AND ack_pending)}"
-              msg_id
-         then execute db
-                sqlc"UPDATE ocamlmq_msgs SET ack_pending = 0 WHERE msg_id = %s"
-                msg_id)
+         if msg_materialized_as_ack_pending db msg_id then
+           execute db
+             sqlc"UPDATE ocamlmq_msgs SET ack_pending = 0 WHERE msg_id = %s"
+             msg_id)
   end;
   return ()
 
