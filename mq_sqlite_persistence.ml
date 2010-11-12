@@ -288,6 +288,8 @@ let get_msg_for_delivery t dest =
       | tup :: _ ->
           let msg = msg_of_tuple tup in
           execute t.db sqlc"INSERT INTO pending_acks VALUES(%s)" msg.msg_id;
+          if count_unmaterialized_pending_acks t.db > 100L then
+            transaction t.db (materialize_pending_acks ~verbose:true);
           return (Some msg)
 
 let count_queue_msgs t dst =
