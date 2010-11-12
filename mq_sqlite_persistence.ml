@@ -46,34 +46,44 @@ let materialize_pending_acks ?(verbose = false) db =
                    WHERE msg_id IN (SELECT msg_id FROM pending_acks)";
   execute db sqlc"DELETE FROM pending_acks"
 
-let flush t =
+let rec flush t =
   let t0 = Unix.gettimeofday () in
+  let flushed = ref false in
   transaction t.db begin fun db ->
-    printf "Flushing to disk: %d msgs, %d + %Ld pending ACKS, %Ld ACKS%!"
-      (Hashtbl.length t.in_mem_msgs)
-      (SSET.cardinal t.ack_pending)
-      (count_unmaterialized_pending_acks db)
-      (count_acked_messages db);
-    Hashtbl.iter
-      (fun _ msg ->
-         execute db
-           sqlc"INSERT INTO ocamlmq_msgs
-                 (ack_pending, msg_id, priority, destination, timestamp,
-                  ack_timeout, body)
-               VALUES(0, %s, %d, %s, %f, %f, %S)"
-           msg.msg_id msg.msg_priority (destination_name msg.msg_destination)
-           msg.msg_timestamp msg.msg_ack_timeout msg.msg_body)
-      t.in_mem_msgs;
-    SSET.iter
-      (execute db sqlc"INSERT INTO pending_acks(msg_id) VALUES(%s)")
-      t.ack_pending;
-    flush_acked_msgs db;
-    materialize_pending_acks db;
-    Hashtbl.clear t.in_mem;
-    Hashtbl.clear t.in_mem_msgs;
-    t.ack_pending <- SSET.empty;
+    let in_mem_msgs = Hashtbl.length t.in_mem_msgs
+    and ack_pending = SSET.cardinal t.ack_pending
+    and unmaterialized_ack_pendings = count_unmaterialized_pending_acks db
+    and acked_msgs = count_acked_messages db in
+      if in_mem_msgs <> 0 || ack_pending <> 0 ||
+         unmaterialized_ack_pendings <> 0L || acked_msgs <> 0L
+      then begin
+        flushed := true;
+        printf "Flushing to disk: %d msgs, %d + %Ld pending ACKS, %Ld ACKS%!"
+          in_mem_msgs ack_pending unmaterialized_ack_pendings acked_msgs;
+        do_flush t db;
+      end
   end;
-  printf " (%8.5fs)\n%!" (Unix.gettimeofday () -. t0)
+  if !flushed then printf " (%8.5fs)\n%!" (Unix.gettimeofday () -. t0)
+
+and do_flush t db =
+  Hashtbl.iter
+    (fun _ msg ->
+       execute db
+         sqlc"INSERT INTO ocamlmq_msgs
+               (ack_pending, msg_id, priority, destination, timestamp,
+                ack_timeout, body)
+             VALUES(0, %s, %d, %s, %f, %f, %S)"
+         msg.msg_id msg.msg_priority (destination_name msg.msg_destination)
+         msg.msg_timestamp msg.msg_ack_timeout msg.msg_body)
+    t.in_mem_msgs;
+  SSET.iter
+    (execute db sqlc"INSERT INTO pending_acks(msg_id) VALUES(%s)")
+    t.ack_pending;
+  flush_acked_msgs db;
+  materialize_pending_acks db;
+  Hashtbl.clear t.in_mem;
+  Hashtbl.clear t.in_mem_msgs;
+  t.ack_pending <- SSET.empty
 
 let msg_materialized_as_ack_pending db msg_id =
   select_one db
