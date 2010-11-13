@@ -4,8 +4,9 @@ suitable for implementing task queues and communication between subsystems:
 
 * persistent queues, scaling over arbitrarily large numbers of queues with
   constant memory usage (i.e. supports millions of queues)
-* strong durability guarantees: messages are guaranteed to have been saved to
-  disk by the time the sender gets a message receipt
+* queued messages need not fit in memory
+* strong durability guarantees: messages can be guaranteed to have been saved
+  to disk (and fsync'ed) by the time the sender gets a message receipt
 * message priorities
 * per-subscription prefetch limit for queue messages
 * error handling and ACK timeout: if a subscriber doesn't ACK a message
@@ -19,11 +20,11 @@ suitable for implementing task queues and communication between subsystems:
 * simple extensions within the STOMP protocol to report the number of messages
   in a queue and the number of subscribers to a queue or topic
 
-ocamlmq is written in OCaml, in less than 1200 lines of code.  It is easy to
-extend and fairly efficient.  The server is abstracted over a storage backend;
-there are currently two backends:
+ocamlmq is written in OCaml, in ~1400 lines of code.  It is easy to extend and
+fairly efficient.  The server is abstracted over a storage backend; there are
+currently two backends:
 * PostgreSQL's (150 LoC)
-* sqlite with in-mem caching (250 LoC)
+* sqlite with in-mem caching (350 LoC)
 
 Scalability
 ===========
@@ -55,11 +56,8 @@ some limitations which preclude its use in other domains:
 * there is no flow control for topic messages (in the intended use case, topic
   messages are assumed to be relatively small and processed fast)
 * messages are limited to 16 MB on 32-bit platforms
-* the PostgreSQL storage backend can only persist a few thousand
-  messages per second (note that ocamlmq allows >50K/s persistent message
-  bursts in async mode)
 * ocamlmq does not support very high message rates (ocamlmq delivers only
-  ~40K messages/second on a 3GHz AMD64 box)
+  ~60K messages/second on a 3GHz AMD64 box)
 
 If you need complex routing rules, scalability to many thousand simultaneous
 connections or other _enterprise_ messaging features, you'll be better served
