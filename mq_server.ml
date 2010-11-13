@@ -581,7 +581,10 @@ let server_loop ?(debug = false) broker =
        eprintf "Got toplevel exception: %s\n%!" (Printexc.to_string e);
        Printexc.print_backtrace stderr;
        Lwt_unix.sleep 0.01) >>
-    loop ()
-  in
-    P.crash_recovery broker.b_msg_store >> loop ()
+    loop () in
+  let t0 = Unix.gettimeofday () in
+    eprintf "Performing crash recovery... %!";
+    lwt () = P.crash_recovery broker.b_msg_store in
+      eprintf "DONE (%8.5fs)\n%!" (Unix.gettimeofday () -. t0);
+      loop ()
 end (* Make functor *)

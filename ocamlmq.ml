@@ -55,8 +55,9 @@ let () =
           (Option.default "ocamlmq.db" !db)
       in
         if !debug then eprintf "Connected to database.\n%!";
-        eprintf "Initializing database.\n%!";
+        eprintf "Initializing database... %!";
         Mq_sqlite_persistence.initialize msg_store >>
+        let () = eprintf "DONE\n%!" in
         lwt broker = SERVER.make_broker
                        ?login:!login ?passcode:!passcode msg_store addr
         in SERVER.server_loop ~debug:!debug broker
