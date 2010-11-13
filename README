@@ -94,9 +94,63 @@ Usage: ocamlmq [options] [sqlite3 database (default: ocamlmq.db)]
   -passcode PASSCODE Passcode expected in CONNECT.
   -maxmsgs N         Flush to disk when there are more than N msgs in mem (default: 100000)
   -flush-period DT   Flush period in seconds (default: 1.0)
+  -flush-wait-time N Wait for N milliseconds before flushing (default 0)
   -debug             Write debug info to stderr.
   -help              Display this list of options
   --help             Display this list of options
+
+ocamlmq stores the messages in memory and flushes to disk (with full fsync)
+when either:
+* more than [maxmsgs] messages have been received since the last flush
+* or it's been [flush-period] seconds since the last flush
+
+You can force a full fsync after each message with -maxmsgs 0; this will be
+slow, since it will be hitting the disk on each message with a "receipt"
+header (otherwise, the message can be saved asynchronously).
+
+If the ocamlmq server is receiving messages concurrently from several clients,
+you can increase the overall throughput *while* ensuring that each message is
+saved (and fsync'ed) to disk before the reply is sent to the client by using
+-flush-wait-time; e.g. -flush-wait-time 50  will wait for 50 ms after
+[maxmsgs] messages have been received, and if more messages are received from
+other connections they will be flushed at once after the flush-wait-time. This
+increases throughput at the expense of latency. Note that [flush-wait-time]
+will only increase throughput if messages are being received concurrently
+through several connections: if there's only a few of them, a too high
+[flush-wait-time] value will *decrease* the overall throughput. In particular,
+if there is only one connection, the throughput will be *less than* 
+   (1000 / flush-wait-time (in ms))
+
+Here follow some figures, taken on an oldish dual core AMD Athlon 64 X2 with a
+7200 RPM SATA disk. In all cases, ocamlmq is run with -maxmsgs 0; messages are
+received concurrently through several connections.
+
+ flush-wait-time       concurrency         throughput
+------------------------------------------------------
+         0                     1           ~260 msg/s
+         0                    10           ~260 msg/s
+         0                    100          ~260 msg/s
+         0                    100          ~260 msg/s
+         0                    100          ~260 msg/s
+        20                     1            ~43 msg/s
+        20                     2            ~85 msg/s
+        20                    10           ~390 msg/s
+        20                    50           ~820 msg/s
+        20                   100          ~1380 msg/s
+        20                   200          ~1480 msg/s
+        50                     1            ~19 msg/s
+        50                     2            ~37 msg/s
+        50                    10           ~177 msg/s
+        50                    50           ~600 msg/s
+        50                   100          ~1150 msg/s
+        50                   200          ~1400 msg/s
+
+Contrast with the throughput with other maxmsgs values:
+
+ maxmsgs        throughput
+ ----------------------------
+   5000         >12000 msg/s
+ "infty"        ~17000 msg/s
 
 STOMP protocol specifics 
 ========================
