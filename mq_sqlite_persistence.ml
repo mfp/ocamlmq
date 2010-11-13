@@ -23,6 +23,8 @@ type t = {
   mutable flush_alarm : unit Lwt.u;
   max_msgs_in_mem : int;
   mutable unacks : SSET.t;
+  flush_wait_time : float;
+  mutable flush_finished_signal : unit Lwt.t;
 }
 
 let count_unmaterialized_pending_acks db =
@@ -109,24 +111,37 @@ let unack db msg_id =
       sqlc"UPDATE ocamlmq_msgs SET ack_pending = 0 WHERE msg_id = %s"
       msg_id
 
-let make ?(max_msgs_in_mem = max_int) ?(flush_period = 1.0) file =
+let make
+      ?(max_msgs_in_mem = max_int)
+      ?(flush_period = 1.0)
+      ?(flush_wait_time = 0.)
+      file =
   let wait_flush, awaken_flush = Lwt.wait () in
+  let flush_finished, awaken_flush_finished = Lwt.wait () in
   let t =
     { db = Sqlexpr_sqlite.open_db file; in_mem = Hashtbl.create 13;
       in_mem_msgs = Hashtbl.create 13; ack_pending = SSET.empty;
       flush_alarm = awaken_flush;
       max_msgs_in_mem = max_msgs_in_mem;
       unacks = SSET.empty;
+      flush_finished_signal = flush_finished;
+      flush_wait_time = flush_wait_time;
     } in
   let flush_period = max flush_period 0.005 in
-  let rec loop_flush wait_flush =
-    Lwt.choose [Lwt_unix.sleep flush_period; wait_flush] >>
-    begin
-      let wait, awaken = Lwt.wait () in
-        flush t;
-        t.flush_alarm <- awaken;
-        loop_flush wait
-    end in
+  let wait_flush_time () =
+    if flush_wait_time > 0. then Lwt_unix.sleep flush_wait_time
+    else return () in
+  let rec loop_flush wait_flush awaken_flush_finished =
+      Lwt.choose [Lwt_unix.sleep flush_period; wait_flush >>= wait_flush_time] >>
+      begin
+        let wait, awaken = Lwt.wait () in
+        let ff, awaken_ff = Lwt.wait () in
+          flush t;
+          t.flush_alarm <- awaken;
+          t.flush_finished_signal <- ff;
+          Lwt.wakeup awaken_flush_finished ();
+          loop_flush wait awaken_ff
+      end in
   let rec loop_flush_unacks () =
     lwt () = Lwt_unix.sleep 0.1 in
       if not (SSET.is_empty t.unacks) then
@@ -138,7 +153,7 @@ let make ?(max_msgs_in_mem = max_int) ?(flush_period = 1.0) file =
       loop_flush_unacks ()
   in
     ignore
-      (try_lwt loop_flush wait_flush
+      (try_lwt loop_flush wait_flush awaken_flush_finished
        with e -> puts "EXCEPTION IN FLUSHER: %s" (Printexc.to_string e);
                  return ());
     ignore
@@ -186,9 +201,13 @@ let do_save_msg t sent msg =
       in Hashtbl.add t.in_mem dest p
   end;
   Hashtbl.add t.in_mem_msgs msg.msg_id msg;
-  if Hashtbl.length t.in_mem_msgs > t.max_msgs_in_mem then
-    Lwt.wakeup t.flush_alarm ();
-  return ()
+  if Hashtbl.length t.in_mem_msgs < t.max_msgs_in_mem then
+    return ()
+  else begin
+    let wait = t.flush_finished_signal in
+      (try Lwt.wakeup t.flush_alarm (); with Invalid_argument _ -> ());
+      wait
+  end
 
 let save_msg t ?low_priority msg =
   do_save_msg t false msg
