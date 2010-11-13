@@ -10,9 +10,8 @@ let debug = ref false
 let login = ref None
 let passcode = ref None
 let db = ref None
-let max_in_mem = ref 10000
+let max_in_mem = ref 100000
 let flush_period = ref 1.
-let flush_wait_ms = ref 0
 
 let params =
   Arg.align
@@ -24,8 +23,6 @@ let params =
         "N Flush to disk when there are more than N msgs in mem (default: 100000)";
       "-flush-period", Arg.Set_float flush_period,
         "DT Flush period in seconds (default: 1.0)";
-      "-flush-wait-time", Arg.Set_int flush_wait_ms,
-        "N Wait for N milliseconds before flushing (default 0)";
       "-debug", Arg.Set debug, " Write debug info to stderr.";
     ]
 
@@ -51,7 +48,6 @@ let () =
         Mq_sqlite_persistence.make
           ~max_msgs_in_mem:!max_in_mem
           ~flush_period:!flush_period
-          ~flush_wait_time:(float !flush_wait_ms *. 1e-3)
           (Option.default "ocamlmq.db" !db)
       in
         if !debug then eprintf "Connected to database.\n%!";
