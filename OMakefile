@@ -24,6 +24,7 @@ OCAMLPACKS[] =
     camlp4.macro
 
 OBJECTS[] =
+    binlog
     extSet
     mq_types
     mq_stomp

@@ -23,6 +23,8 @@ type t = {
   mutable flush_alarm : unit Lwt.u;
   max_msgs_in_mem : int;
   mutable unacks : SSET.t;
+  binlog_file : string option;
+  mutable binlog : Binlog.t option;
 }
 
 let count_unmaterialized_pending_acks db =
@@ -74,6 +76,7 @@ let rec flush t =
         do_flush t db;
       end
   end;
+  Option.may Binlog.truncate t.binlog;
   if !flushed then puts " (%8.5fs)" (Unix.gettimeofday () -. t0)
 
 and do_flush t db =
@@ -109,7 +112,7 @@ let unack db msg_id =
       sqlc"UPDATE ocamlmq_msgs SET ack_pending = 0 WHERE msg_id = %s"
       msg_id
 
-let make ?(max_msgs_in_mem = max_int) ?(flush_period = 1.0) file =
+let make ?(max_msgs_in_mem = max_int) ?(flush_period = 1.0) ?binlog file =
   let wait_flush, awaken_flush = Lwt.wait () in
   let t =
     { db = Sqlexpr_sqlite.open_db file; in_mem = Hashtbl.create 13;
@@ -117,6 +120,7 @@ let make ?(max_msgs_in_mem = max_int) ?(flush_period = 1.0) file =
       flush_alarm = awaken_flush;
       max_msgs_in_mem = max_msgs_in_mem;
       unacks = SSET.empty;
+      binlog_file = binlog; binlog = None;
     } in
   let flush_period = max flush_period 0.005 in
   let rec loop_flush wait_flush =
@@ -195,6 +199,7 @@ let do_save_msg t sent msg =
   return ()
 
 let save_msg t ?low_priority msg =
+  Option.map_default (fun log -> Binlog.add log msg) (return ()) t.binlog >>
   do_save_msg t false msg
 
 let register_ack_pending_msg t msg_id =
@@ -258,14 +263,15 @@ let ack_msg t msg_id =
       t.ack_pending <- SSET.remove msg_id t.ack_pending;
       let dst = destination_name msg.msg_destination in
       let unsent, want_ack = Hashtbl.find t.in_mem dst in
-        Hashtbl.replace t.in_mem dst (unsent, SSET.remove msg_id want_ack)
+        Hashtbl.replace t.in_mem dst (unsent, SSET.remove msg_id want_ack);
+        Option.map_default (fun log -> Binlog.cancel log msg) (return ()) t.binlog
   end else begin
     execute t.db sqlc"INSERT INTO acked_msgs(msg_id) VALUES(%s)" msg_id;
     t.ack_pending <- SSET.remove msg_id t.ack_pending;
     if count_acked_messages t.db > 100L then
       transaction t.db (flush_acked_msgs ~verbose:true);
-  end;
-  return ()
+    return ()
+  end
 
 let unack_msg t msg_id =
   if SSET.mem msg_id t.ack_pending then begin
@@ -328,6 +334,14 @@ let count_queue_msgs t dst =
 
 let crash_recovery t =
   execute t.db sqlc"UPDATE ocamlmq_msgs SET ack_pending = 0 WHERE ack_pending = 1";
-  return ()
+  begin match t.binlog_file with
+      None -> return ()
+    | Some f ->
+        lwt msgs = Binlog.read f in
+        let binlog = Binlog.make f in
+          t.binlog <- Some binlog;
+          eprintf "(binlog: %d msgs) %!" (List.length msgs);
+          Lwt_list.iter_s (save_msg t) msgs
+  end
 
 let init_db, check_db, auto_check_db = sql_check"sqlite"

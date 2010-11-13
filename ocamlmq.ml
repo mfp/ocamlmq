@@ -12,6 +12,7 @@ let passcode = ref None
 let db = ref None
 let max_in_mem = ref 100000
 let flush_period = ref 1.
+let binlog = ref ""
 
 let params =
   Arg.align
@@ -23,6 +24,8 @@ let params =
         "N Flush to disk when there are more than N msgs in mem (default: 100000)";
       "-flush-period", Arg.Set_float flush_period,
         "DT Flush period in seconds (default: 1.0)";
+      "-binlog", Arg.Set_string binlog,
+        "FILE Use FILE as the binlog for msgs in mem (default: none).";
       "-debug", Arg.Set debug, " Write debug info to stderr.";
     ]
 
@@ -48,6 +51,7 @@ let () =
         Mq_sqlite_persistence.make
           ~max_msgs_in_mem:!max_in_mem
           ~flush_period:!flush_period
+          ?binlog:(match !binlog with "" -> None | s -> Some s)
           (Option.default "ocamlmq.db" !db)
       in
         if !debug then eprintf "Connected to database.\n%!";
