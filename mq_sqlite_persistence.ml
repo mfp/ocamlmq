@@ -179,6 +179,10 @@ let initialize t =
             ocamlmq_msgs_destination_priority_timestamp
             ON ocamlmq_msgs(destination, ack_pending, priority, timestamp)";
   execute t.db
+    sqlinit"CREATE INDEX IF NOT EXISTS
+            ocamlmq_msgs_ack_pending
+            ON ocamlmq_msgs(ack_pending)";
+  execute t.db
     sqlinit"CREATE TABLE mem.pending_acks(msg_id VARCHAR(255) NOT NULL PRIMARY KEY)";
   execute t.db
     sqlinit"CREATE TABLE mem.acked_msgs(msg_id VARCHAR(255) NOT NULL PRIMARY KEY)";
@@ -342,7 +346,7 @@ let count_queue_msgs t dst =
     return (Int64.add (Int64.of_int in_mem) in_db)
 
 let crash_recovery t =
-  execute t.db sqlc"UPDATE ocamlmq_msgs SET ack_pending = 0";
+  execute t.db sqlc"UPDATE ocamlmq_msgs SET ack_pending = 0 WHERE ack_pending = 1";
   return ()
 
 let init_db, check_db, auto_check_db = sql_check"sqlite"
