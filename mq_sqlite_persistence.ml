@@ -124,7 +124,7 @@ let make ?(max_msgs_in_mem = max_int) ?(flush_period = 1.0) ?binlog file =
     } in
   let flush_period = max flush_period 0.005 in
   let rec loop_flush wait_flush =
-    Lwt.choose [Lwt_unix.sleep flush_period; wait_flush] >>
+    Lwt.pick [Lwt_unix.sleep flush_period; wait_flush] >>
     begin
       let wait, awaken = Lwt.wait () in
         flush t;
