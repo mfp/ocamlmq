@@ -77,9 +77,13 @@ You'll need a working OCaml environment plus the following libraries:
 
 Additionally, ocamlmq requires PostgreSQL both at compile- and run-time.
 
-Just do
+If you have omake, Just do
 
   $ omake
+
+otherwise, run
+
+  $ sh build.sh
 
 Running
 =======
