@@ -13,6 +13,7 @@ let db = ref None
 let max_in_mem = ref 100000
 let flush_period = ref 1.
 let binlog = ref ""
+let sync_binlog = ref false
 
 let params =
   Arg.align
@@ -26,6 +27,8 @@ let params =
         "DT Flush period in seconds (default: 1.0)";
       "-binlog", Arg.Set_string binlog,
         "FILE Use FILE as the binlog for msgs in mem (default: none).";
+      "-sync-binlog", Arg.Set sync_binlog,
+        " fsync the binlog on each write (default: no)";
       "-debug", Arg.Set debug, " Write debug info to stderr.";
     ]
 
@@ -52,6 +55,7 @@ let () =
           ~max_msgs_in_mem:!max_in_mem
           ~flush_period:!flush_period
           ?binlog:(match !binlog with "" -> None | s -> Some s)
+          ~sync_binlog:!sync_binlog
           (Option.default "ocamlmq.db" !db)
       in
         if !debug then eprintf "Connected to database.\n%!";

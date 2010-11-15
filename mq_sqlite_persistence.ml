@@ -25,6 +25,7 @@ type t = {
   mutable unacks : SSET.t;
   binlog_file : string option;
   mutable binlog : Binlog.t option;
+  sync_binlog : bool;
 }
 
 let count_unmaterialized_pending_acks db =
@@ -112,7 +113,8 @@ let unack db msg_id =
       sqlc"UPDATE ocamlmq_msgs SET ack_pending = 0 WHERE msg_id = %s"
       msg_id
 
-let make ?(max_msgs_in_mem = max_int) ?(flush_period = 1.0) ?binlog file =
+let make ?(max_msgs_in_mem = max_int) ?(flush_period = 1.0)
+         ?binlog ?(sync_binlog = false) file =
   let wait_flush, awaken_flush = Lwt.wait () in
   let t =
     { db = Sqlexpr_sqlite.open_db file; in_mem = Hashtbl.create 13;
@@ -121,6 +123,7 @@ let make ?(max_msgs_in_mem = max_int) ?(flush_period = 1.0) ?binlog file =
       max_msgs_in_mem = max_msgs_in_mem;
       unacks = SSET.empty;
       binlog_file = binlog; binlog = None;
+      sync_binlog = sync_binlog;
     } in
   let flush_period = max flush_period 0.005 in
   let rec loop_flush wait_flush =
@@ -338,7 +341,7 @@ let crash_recovery t =
       None -> return ()
     | Some f ->
         lwt msgs = Binlog.read f in
-        let binlog = Binlog.make f in
+        let binlog = Binlog.make ~sync:t.sync_binlog f in
           t.binlog <- Some binlog;
           eprintf "(binlog: %d msgs) %!" (List.length msgs);
           Lwt_list.iter_s (save_msg t) msgs

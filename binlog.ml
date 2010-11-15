@@ -8,8 +8,9 @@ type record =
   | Del of string
   | Nothing
 
-let make file =
-  let fd = Unix.openfile file [ Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC ] 0o640 in
+let make ?(sync = false) file =
+  let sync = if sync then [ Unix.O_SYNC ] else [] in
+  let fd = Unix.openfile file ([ Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC ] @ sync) 0o640 in
   let och = Lwt_io.of_unix_fd ~mode:Lwt_io.output fd in
     { fd = fd; och = och; }
 
