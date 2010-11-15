@@ -33,4 +33,5 @@ ocamlfind ocamlopt -syntax camlp4o -ppopt ocaml-sqlexpr/pa_sql.cmo -package csv,
 ocamlfind ocamlopt -syntax camlp4o -ppopt ocaml-sqlexpr/pa_sql.cmo -package csv,lwt,lwt.unix,lwt.syntax,estring,extlib,unix,str,sqlite3,camlp4.macro -warn-error A -S -inline 100 -I . -I ocaml-sqlexpr -c mq_sqlite_persistence.ml
 ocamlfind ocamlc -syntax camlp4o -package csv,lwt,lwt.unix,lwt.syntax,estring,extlib,unix,str,sqlite3,camlp4.macro -warn-error A -g -g -annot -I . -I ocaml-sqlexpr -c ocamlmq.ml
 ocamlfind ocamlopt -syntax camlp4o -package csv,lwt,lwt.unix,lwt.syntax,estring,extlib,unix,str,sqlite3,camlp4.macro -warn-error A -S -inline 100 -I . -I ocaml-sqlexpr -c ocamlmq.ml
-ocamlfind ocamlopt -syntax camlp4o -package csv,lwt,lwt.unix,lwt.syntax,estring,extlib,unix,str,sqlite3,camlp4.macro -warn-error A -S -inline 100 -I . -I ocaml-sqlexpr -o ocamlmq.opt ocaml-sqlexpr/sqlexpr.cmxa mq_types.cmx binlog.cmx extSet.cmx mq_stomp.cmx ternary.cmx mq_server.cmx mq_sqlite_persistence.cmx ocamlmq.cmx -linkpkg
+ocamlfind ocamlopt -syntax camlp4o -package csv,lwt,lwt.unix,lwt.syntax,estring,extlib,unix,str,sqlite3,camlp4.macro -warn-error A -S -inline 100 -I . -I ocaml-sqlexpr -o ocamlmq ocaml-sqlexpr/sqlexpr.cmxa mq_types.cmx binlog.cmx extSet.cmx mq_stomp.cmx ternary.cmx mq_server.cmx mq_sqlite_persistence.cmx ocamlmq.cmx -linkpkg
+
