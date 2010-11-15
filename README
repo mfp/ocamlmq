@@ -20,7 +20,7 @@ suitable for implementing task queues and communication between subsystems:
 * simple extensions within the STOMP protocol to report the number of messages
   in a queue and the number of subscribers to a queue or topic
 
-ocamlmq is written in OCaml, in ~1400 lines of code.  It is easy to extend and
+ocamlmq is written in OCaml, in ~1500 lines of code.  It is easy to extend and
 fairly efficient.  The server is abstracted over a storage backend; there are
 currently two backends:
 * PostgreSQL's (150 LoC)
@@ -85,29 +85,41 @@ otherwise, run
 
   $ sh build.sh
 
+Installing
+==========
+
+The ocamlmq executable is self-contained and can be copied to any directory in
+your PATH if desired.
+
 Running
 =======
 
 ocamlmq's configuration is given via the command line:
 
 Usage: ocamlmq [options] [sqlite3 database (default: ocamlmq.db)]
-  -port PORT         Port to listen at (default: 61613).
-  -login LOGIN       Login expected in CONNECT.
-  -passcode PASSCODE Passcode expected in CONNECT.
-  -maxmsgs N         Flush to disk when there are more than N msgs in mem (default: 100000)
-  -flush-period DT   Flush period in seconds (default: 1.0)
-  -binlog FILE       Use FILE as the binlog for msgs in mem (default: none).
-  -debug             Write debug info to stderr.
+  -port PORT         Port to listen at (default: 61613)
+  -login LOGIN       Login expected in CONNECT
+  -passcode PASSCODE Passcode expected in CONNECT
+  -maxmsgs N         Keep at most N msgs in mem before hard flush (default: 100000)
+  -flush-period DT   Hard flush period in seconds (default: 1.0)
+  -binlog FILE       Use FILE as the binlog for msgs in mem (default: none)
+  -sync-binlog       fsync the binlog on each write (default: no)
+  -debug             Write debug info to stderr
   -help              Display this list of options
   --help             Display this list of options
 
-ocamlmq stores the messages in memory and flushes to disk (with full fsync)
-when either:
-* more than [maxmsgs] messages have been received since the last flush
-* or it's been [flush-period] seconds since the last flush
+ocamlmq stores the messages in memory (and optionally in the binlog) and
+flushes to the permanent store (with full fsync) when either:
+* more than [maxmsgs] messages have been received since the last flush or
+* it's been [flush-period] seconds since the last flush
 
 With the -binlog option, the messages kept in mem will also be written to a
 binary log before they are flushed (and fsync'ed) to the permanent store.
+This way, in-mem (not yet flushed) messages can be recovered if ocamlmq were
+killed or crashed.  You can moreover ensure that the binlog is fsync'ed after
+each write with -sync-binlog. This brings you the strongest durability
+guarantees, for every single message is fsync'ed before the broker
+acknowledges its reception.
 
 Performance
 ===========
@@ -122,6 +134,9 @@ Queueing:
    1000         >11000 msg/s      >9000 msg/s
    5000         >12000 msg/s      >9000 msg/s
  "infty"        >17000 msg/s     >14000 msg/s
+
+ If the binlog is enabled and -sync-binlog in use, the maximum throughput is
+ around 4000 msg/s.
 
 STOMP protocol specifics 
 ========================
