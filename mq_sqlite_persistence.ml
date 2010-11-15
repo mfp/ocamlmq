@@ -180,7 +180,7 @@ let initialize t =
     sqlinit"CREATE TABLE mem.acked_msgs(msg_id VARCHAR(255) NOT NULL PRIMARY KEY)";
   return ()
 
-let do_save_msg t sent msg =
+let do_save_msg ?(can_flush = true) t sent msg =
   let dest = destination_name msg.msg_destination in
   let v = (msg.msg_priority, msg) in
   begin
@@ -197,7 +197,7 @@ let do_save_msg t sent msg =
       in Hashtbl.add t.in_mem dest p
   end;
   Hashtbl.add t.in_mem_msgs msg.msg_id msg;
-  if Hashtbl.length t.in_mem_msgs > t.max_msgs_in_mem then
+  if can_flush && Hashtbl.length t.in_mem_msgs > t.max_msgs_in_mem then
     Lwt.wakeup t.flush_alarm ();
   return ()
 
@@ -340,11 +340,10 @@ let crash_recovery t =
   begin match t.binlog_file with
       None -> return ()
     | Some f ->
-        lwt msgs = Binlog.read f in
-        let binlog = Binlog.make ~sync:t.sync_binlog f in
+        lwt binlog, msgs = Binlog.make ~sync:t.sync_binlog f in
           t.binlog <- Some binlog;
           eprintf "(binlog: %d msgs) %!" (List.length msgs);
-          Lwt_list.iter_s (save_msg t) msgs
+          Lwt_list.iter_s (do_save_msg ~can_flush:false t false) msgs
   end
 
 let init_db, check_db, auto_check_db = sql_check"sqlite"

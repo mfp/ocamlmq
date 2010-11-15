@@ -1,5 +1,6 @@
 open Lwt
 open Mq_types
+open Printf
 
 type t = { fd : Unix.file_descr; och : Lwt_io.output_channel }
 
@@ -7,12 +8,6 @@ type record =
     Add of message
   | Del of string
   | Nothing
-
-let make ?(sync = false) file =
-  let sync = if sync then [ Unix.O_SYNC ] else [] in
-  let fd = Unix.openfile file ([ Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC ] @ sync) 0o640 in
-  let och = Lwt_io.of_unix_fd ~mode:Lwt_io.output fd in
-    { fd = fd; och = och; }
 
 let truncate t =
   Unix.ftruncate t.fd 0;
@@ -55,19 +50,6 @@ let read_record ich =
       end
   with End_of_file -> return Nothing
 
-let read file =
-  try_lwt
-    Lwt_io.with_file ~mode:Lwt_io.input file
-      (fun ich ->
-         let h = Hashtbl.create 13 in
-         let rec loop () = read_record ich >>= function
-             Nothing -> return ()
-           | Add msg -> Hashtbl.add h msg.msg_id msg; loop ()
-           | Del msg_id -> Hashtbl.remove h msg_id; loop ()
-         in loop () >>
-            return (Hashtbl.fold (fun _ msg l -> msg :: l) h []))
-  with Unix.Unix_error _ -> return []
-
 let write_string och s =
   LE.write_int och (String.length s) >>
   Lwt_io.write och s
@@ -85,8 +67,48 @@ let write_record och = function
       write_string och msg.msg_body >>
       LE.write_float64 och msg.msg_ack_timeout
 
-let write_record och r =
-  Lwt_io.atomic (fun och -> write_record och r) och >> Lwt_io.flush och
+let write_record ?(flush = true) och r =
+  Lwt_io.atomic (fun och -> write_record och r) och >>
+  if flush then Lwt_io.flush och else return ()
 
 let cancel t msg = write_record t.och (Del msg.msg_id)
 let add t msg = write_record t.och (Add msg)
+
+(* Creates [dst] even if [src] cannot be read *)
+let copy src dst =
+  Lwt_io.with_file
+    ~flags:[Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC]
+    ~mode:Lwt_io.output dst (fun _ -> return ()) >>
+  Lwt_io.with_file ~mode:Lwt_io.input src
+    (fun ich ->
+       Lwt_io.with_file
+         ~flags:[Unix.O_SYNC; Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC]
+         ~buffer_size:(1024 * 1024)
+         ~mode:Lwt_io.output dst
+         (fun och ->
+            let h = Hashtbl.create 13 in
+            let rec copy_loop () =
+              read_record ich >>= function
+                  Add msg as x ->
+                    Hashtbl.add h msg.msg_id msg;
+                    write_record ~flush:false och x >> copy_loop ()
+                | Del msg_id as x ->
+                    Hashtbl.remove h msg_id;
+                    write_record ~flush:false och x >> copy_loop ()
+                | Nothing -> return ()
+            in copy_loop () >>
+               return (Hashtbl.fold (fun _ msg l -> msg :: l) h [])))
+
+let copy src dst =
+  try_lwt
+    copy src dst
+  with Unix.Unix_error (Unix.ENOENT, _, _) -> return []
+
+let make ?(sync = false) file =
+  let tmp = sprintf "%s.%d.%d" file (Unix.getpid ()) (Random.int 0x3FFFFFFF) in
+  lwt msgs = copy file tmp in
+    Sys.rename tmp file;
+    let sync = if sync then [ Unix.O_SYNC ] else [] in
+    let fd = Unix.openfile file ([ Unix.O_WRONLY; ] @ sync) 0o640 in
+    let och = Lwt_io.of_unix_fd ~mode:Lwt_io.output fd in
+      return ({ fd = fd; och = och; }, msgs)
