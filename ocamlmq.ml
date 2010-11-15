@@ -18,18 +18,18 @@ let sync_binlog = ref false
 let params =
   Arg.align
     [
-      "-port", Arg.Set_int port, "PORT Port to listen at (default: 61613).";
-      "-login", set_some_string login, "LOGIN Login expected in CONNECT.";
-      "-passcode", set_some_string passcode, "PASSCODE Passcode expected in CONNECT.";
+      "-port", Arg.Set_int port, "PORT Port to listen at (default: 61613)";
+      "-login", set_some_string login, "LOGIN Login expected in CONNECT";
+      "-passcode", set_some_string passcode, "PASSCODE Passcode expected in CONNECT";
       "-maxmsgs", Arg.Set_int max_in_mem,
-        "N Flush to disk when there are more than N msgs in mem (default: 100000)";
+        "N Keep at most N msgs in mem before hard flush (default: 100000)";
       "-flush-period", Arg.Set_float flush_period,
-        "DT Flush period in seconds (default: 1.0)";
+        "DT Hard flush period in seconds (default: 1.0)";
       "-binlog", Arg.Set_string binlog,
-        "FILE Use FILE as the binlog for msgs in mem (default: none).";
+        "FILE Use FILE as the binlog for msgs in mem (default: none)";
       "-sync-binlog", Arg.Set sync_binlog,
         " fsync the binlog on each write (default: no)";
-      "-debug", Arg.Set debug, " Write debug info to stderr.";
+      "-debug", Arg.Set debug, " Write debug info to stderr";
     ]
 
 let usage_message = "Usage: ocamlmq [options] [sqlite3 database (default: ocamlmq.db)]"
