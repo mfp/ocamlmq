@@ -71,7 +71,7 @@ Building
 You'll need a working OCaml environment plus the following libraries:
 * Lwt
 * extlib
-* ocaml-sqlite3
+* ocaml-sqlite3 (and sqlite3 >= 3.6.8, for SAVEPOINT support)
 * csv
 * estring
 

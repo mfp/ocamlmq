@@ -113,6 +113,13 @@ let unack db msg_id =
       sqlc"UPDATE ocamlmq_msgs SET ack_pending = 0 WHERE msg_id = %s"
       msg_id
 
+let check_sqlite_version_ok db =
+  let v = select_one db sqlc"SELECT @s{sqlite_version()}" in
+  let to_num s = Scanf.sscanf s "%d" (fun n -> n) in
+  let ns = List.map to_num (ExtString.String.nsplit v ".") in
+    if ns < [ 3; 6; 8 ] then
+      failwith (sprintf "Need sqlite3 >= 3.6.8 (found: %s)" v)
+
 let make ?(max_msgs_in_mem = max_int) ?(flush_period = 1.0)
          ?binlog ?(sync_binlog = false) file =
   let wait_flush, awaken_flush = Lwt.wait () in
@@ -144,6 +151,7 @@ let make ?(max_msgs_in_mem = max_int) ?(flush_period = 1.0)
       t.unacks <- SSET.empty;
       loop_flush_unacks ()
   in
+    check_sqlite_version_ok t.db;
     ignore
       (try_lwt loop_flush wait_flush
        with e -> puts "EXCEPTION IN FLUSHER: %s" (Printexc.to_string e);
