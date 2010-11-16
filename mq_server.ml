@@ -9,7 +9,6 @@ sig
 
   val initialize : t -> unit Lwt.t
   val save_msg : t -> ?low_priority:bool -> Mq_types.message -> unit Lwt.t
-  val register_ack_pending_new_msg : t -> Mq_types.message -> unit Lwt.t
   (** Returns [false] if the msg was already in the ACK-pending set. *)
   val register_ack_pending_msg : t -> string -> bool Lwt.t
   val get_ack_pending_msg : t -> string -> Mq_types.message option Lwt.t
@@ -582,7 +581,10 @@ let server_loop ?(debug = false) broker =
        eprintf "Got toplevel exception: %s\n%!" (Printexc.to_string e);
        Printexc.print_backtrace stderr;
        Lwt_unix.sleep 0.01) >>
-    loop ()
-  in
-    P.crash_recovery broker.b_msg_store >> loop ()
+    loop () in
+  let t0 = Unix.gettimeofday () in
+    eprintf "Performing crash recovery... %!";
+    lwt () = P.crash_recovery broker.b_msg_store in
+      eprintf "DONE (%8.5fs)\n%!" (Unix.gettimeofday () -. t0);
+      loop ()
 end (* Make functor *)

@@ -1,22 +1,37 @@
 #!/bin/sh
 
 set -e
+set -x
 
-ocamlfind ocamlc -package lwt,lwt.unix,lwt.syntax,extlib,unix,str,pgocaml,pgocaml.syntax,camlp4.macro -warn-error A -syntax camlp4o -g -g -annot -I . -c mq_types.ml
-ocamlfind ocamlopt -package lwt,lwt.unix,lwt.syntax,extlib,unix,str,pgocaml,pgocaml.syntax,camlp4.macro -warn-error A -syntax camlp4o -S -inline 100 -I . -c mq_types.ml
-ocamlfind ocamlc -package lwt,lwt.unix,lwt.syntax,extlib,unix,str,pgocaml,pgocaml.syntax,camlp4.macro -warn-error A -syntax camlp4o -g -g -annot -I . -c pGOCaml_lwt.ml
-ocamlfind ocamlopt -package lwt,lwt.unix,lwt.syntax,extlib,unix,str,pgocaml,pgocaml.syntax,camlp4.macro -warn-error A -syntax camlp4o -S -inline 100 -I . -c pGOCaml_lwt.ml
-ocamlfind ocamlc -package lwt,lwt.unix,lwt.syntax,extlib,unix,str,pgocaml,pgocaml.syntax,camlp4.macro -warn-error A -syntax camlp4o -g -g -annot -I . -c extSet.mli
-ocamlfind ocamlopt -package lwt,lwt.unix,lwt.syntax,extlib,unix,str,pgocaml,pgocaml.syntax,camlp4.macro -warn-error A -syntax camlp4o -S -inline 100 -I . -c extSet.ml
-ocamlfind ocamlc -package lwt,lwt.unix,lwt.syntax,extlib,unix,str,pgocaml,pgocaml.syntax,camlp4.macro -warn-error A -syntax camlp4o -g -g -annot -I . -c ternary.mli
-ocamlfind ocamlopt -package lwt,lwt.unix,lwt.syntax,extlib,unix,str,pgocaml,pgocaml.syntax,camlp4.macro -warn-error A -syntax camlp4o -S -inline 100 -I . -c ternary.ml
-ruby generate_prepared_statements.rb create_db schema.sql > mq_schema.ml
-ocamlfind ocamlc -package lwt,lwt.unix,lwt.syntax,extlib,unix,str,pgocaml,pgocaml.syntax,camlp4.macro -warn-error A -syntax camlp4o -g -g -annot -I . -c mq_stomp.ml
-ocamlfind ocamlopt -package lwt,lwt.unix,lwt.syntax,extlib,unix,str,pgocaml,pgocaml.syntax,camlp4.macro -warn-error A -syntax camlp4o -S -inline 100 -I . -c mq_stomp.ml
-ocamlfind ocamlc -package lwt,lwt.unix,lwt.syntax,extlib,unix,str,pgocaml,pgocaml.syntax,camlp4.macro -warn-error A -syntax camlp4o -g -g -annot -I . -c mq_server.ml
-ocamlfind ocamlopt -package lwt,lwt.unix,lwt.syntax,extlib,unix,str,pgocaml,pgocaml.syntax,camlp4.macro -warn-error A -syntax camlp4o -S -inline 100 -I . -c mq_server.ml
-ocamlfind ocamlc -package lwt,lwt.unix,lwt.syntax,extlib,unix,str,pgocaml,pgocaml.syntax,camlp4.macro -warn-error A -syntax camlp4o -g -g -annot -I . -c mq_pg_persistence.mli
-ocamlfind ocamlopt -package lwt,lwt.unix,lwt.syntax,extlib,unix,str,pgocaml,pgocaml.syntax,camlp4.macro -warn-error A -syntax camlp4o -S -inline 100 -I . -c mq_pg_persistence.ml
-ocamlfind ocamlc -package lwt,lwt.unix,lwt.syntax,extlib,unix,str,pgocaml,pgocaml.syntax,camlp4.macro -warn-error A -syntax camlp4o -g -g -annot -I . -c ocamlmq.ml
-ocamlfind ocamlopt -package lwt,lwt.unix,lwt.syntax,extlib,unix,str,pgocaml,pgocaml.syntax,camlp4.macro -warn-error A -syntax camlp4o -S -inline 100 -I . -c ocamlmq.ml
-ocamlfind ocamlopt -package lwt,lwt.unix,lwt.syntax,extlib,unix,str,pgocaml,pgocaml.syntax,camlp4.macro -warn-error A -syntax camlp4o -S -inline 100 -I . -o ocamlmq extSet.cmx mq_types.cmx mq_stomp.cmx pGOCaml_lwt.cmx mq_pg_persistence.cmx ternary.cmx mq_server.cmx ocamlmq.cmx -linkpkg
+cd ocaml-sqlexpr
+
+ocamlfind ocamlc -syntax camlp4o -package estring,camlp4.quotations -warn-error A -g -I . -c pa_sql.ml
+ocamlfind ocamlc -syntax camlp4o -syntax camlp4o -ppopt pa_sql.cmo -package csv,extlib,sqlite3,estring,lwt,lwt.syntax -warn-error A -g -I . -c sqlexpr_concurrency.ml
+ocamlfind ocamlopt -syntax camlp4o -syntax camlp4o -ppopt pa_sql.cmo -package csv,extlib,sqlite3,estring,lwt,lwt.syntax -warn-error A -S -inline 100 -I . -c sqlexpr_concurrency.ml
+ocamlfind ocamlc -syntax camlp4o -syntax camlp4o -ppopt pa_sql.cmo -package csv,extlib,sqlite3,estring,lwt,lwt.syntax -warn-error A -g -I . -c sqlexpr_sqlite.mli
+ocamlfind ocamlopt -syntax camlp4o -syntax camlp4o -ppopt pa_sql.cmo -package csv,extlib,sqlite3,estring,lwt,lwt.syntax -warn-error A -S -inline 100 -I . -c sqlexpr_sqlite.ml
+ocamlfind ocamlc -syntax camlp4o -syntax camlp4o -ppopt pa_sql.cmo -package csv,extlib,sqlite3,estring,lwt,lwt.syntax -warn-error A -g -I . -c sqlexpr_sqlite.ml
+ocamlfind ocamlopt -syntax camlp4o -syntax camlp4o -ppopt pa_sql.cmo -package csv,extlib,sqlite3,estring,lwt,lwt.syntax -warn-error A -S -inline 100 -a -o sqlexpr.cmxa sqlexpr_concurrency.cmx sqlexpr_sqlite.cmx
+ocamlfind ocamlc -syntax camlp4o -syntax camlp4o -ppopt pa_sql.cmo -package csv,extlib,sqlite3,estring,lwt,lwt.syntax -warn-error A -g -a -o sqlexpr.cma sqlexpr_concurrency.cmo sqlexpr_sqlite.cmo
+
+cd ..
+
+ocamlfind ocamlc -syntax camlp4o -package csv,lwt,lwt.unix,lwt.syntax,estring,extlib,unix,str,sqlite3,camlp4.macro -warn-error A -g -g -annot -I . -I ocaml-sqlexpr -c mq_types.ml
+ocamlfind ocamlopt -syntax camlp4o -package csv,lwt,lwt.unix,lwt.syntax,estring,extlib,unix,str,sqlite3,camlp4.macro -warn-error A -S -inline 100 -I . -I ocaml-sqlexpr -c mq_types.ml
+ocamlfind ocamlc -syntax camlp4o -package csv,lwt,lwt.unix,lwt.syntax,estring,extlib,unix,str,sqlite3,camlp4.macro -warn-error A -g -g -annot -I . -I ocaml-sqlexpr -c binlog.mli
+ocamlfind ocamlopt -syntax camlp4o -package csv,lwt,lwt.unix,lwt.syntax,estring,extlib,unix,str,sqlite3,camlp4.macro -warn-error A -S -inline 100 -I . -I ocaml-sqlexpr -c binlog.ml
+ocamlfind ocamlc -syntax camlp4o -package csv,lwt,lwt.unix,lwt.syntax,estring,extlib,unix,str,sqlite3,camlp4.macro -warn-error A -g -g -annot -I . -I ocaml-sqlexpr -c extSet.mli
+ocamlfind ocamlopt -syntax camlp4o -package csv,lwt,lwt.unix,lwt.syntax,estring,extlib,unix,str,sqlite3,camlp4.macro -warn-error A -S -inline 100 -I . -I ocaml-sqlexpr -c extSet.ml
+ocamlfind ocamlc -syntax camlp4o -package csv,lwt,lwt.unix,lwt.syntax,estring,extlib,unix,str,sqlite3,camlp4.macro -warn-error A -g -g -annot -I . -I ocaml-sqlexpr -c ternary.mli
+ocamlfind ocamlopt -syntax camlp4o -package csv,lwt,lwt.unix,lwt.syntax,estring,extlib,unix,str,sqlite3,camlp4.macro -warn-error A -S -inline 100 -I . -I ocaml-sqlexpr -c ternary.ml
+ocamlfind ocamlc -syntax camlp4o -package csv,lwt,lwt.unix,lwt.syntax,estring,extlib,unix,str,sqlite3,camlp4.macro -warn-error A -g -g -annot -I . -I ocaml-sqlexpr -c mq_stomp.ml
+ocamlfind ocamlopt -syntax camlp4o -package csv,lwt,lwt.unix,lwt.syntax,estring,extlib,unix,str,sqlite3,camlp4.macro -warn-error A -S -inline 100 -I . -I ocaml-sqlexpr -c mq_stomp.ml
+ocamlfind ocamlc -syntax camlp4o -package csv,lwt,lwt.unix,lwt.syntax,estring,extlib,unix,str,sqlite3,camlp4.macro -warn-error A -g -g -annot -I . -I ocaml-sqlexpr -c mq_server.ml
+ocamlfind ocamlopt -syntax camlp4o -package csv,lwt,lwt.unix,lwt.syntax,estring,extlib,unix,str,sqlite3,camlp4.macro -warn-error A -S -inline 100 -I . -I ocaml-sqlexpr -c mq_server.ml
+ocamlfind ocamlc -syntax camlp4o -ppopt ocaml-sqlexpr/pa_sql.cmo -package csv,lwt,lwt.unix,lwt.syntax,estring,extlib,unix,str,sqlite3,camlp4.macro -warn-error A -g -g -annot -I . -I ocaml-sqlexpr -c mq_sqlite_persistence.mli
+ocamlfind ocamlopt -syntax camlp4o -ppopt ocaml-sqlexpr/pa_sql.cmo -package csv,lwt,lwt.unix,lwt.syntax,estring,extlib,unix,str,sqlite3,camlp4.macro -warn-error A -S -inline 100 -I . -I ocaml-sqlexpr -c mq_sqlite_persistence.ml
+ocamlfind ocamlopt -syntax camlp4o -ppopt ocaml-sqlexpr/pa_sql.cmo -package csv,lwt,lwt.unix,lwt.syntax,estring,extlib,unix,str,sqlite3,camlp4.macro -warn-error A -S -inline 100 -I . -I ocaml-sqlexpr -c mq_sqlite_persistence.ml
+ocamlfind ocamlc -syntax camlp4o -package csv,lwt,lwt.unix,lwt.syntax,estring,extlib,unix,str,sqlite3,camlp4.macro -warn-error A -g -g -annot -I . -I ocaml-sqlexpr -c ocamlmq.ml
+ocamlfind ocamlopt -syntax camlp4o -package csv,lwt,lwt.unix,lwt.syntax,estring,extlib,unix,str,sqlite3,camlp4.macro -warn-error A -S -inline 100 -I . -I ocaml-sqlexpr -c ocamlmq.ml
+ocamlfind ocamlopt -syntax camlp4o -package csv,lwt,lwt.unix,lwt.syntax,estring,extlib,unix,str,sqlite3,camlp4.macro -warn-error A -S -inline 100 -I . -I ocaml-sqlexpr -o ocamlmq ocaml-sqlexpr/sqlexpr.cmxa mq_types.cmx binlog.cmx extSet.cmx mq_stomp.cmx ternary.cmx mq_server.cmx mq_sqlite_persistence.cmx ocamlmq.cmx -linkpkg
+

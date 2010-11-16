@@ -4,8 +4,9 @@ suitable for implementing task queues and communication between subsystems:
 
 * persistent queues, scaling over arbitrarily large numbers of queues with
   constant memory usage (i.e. supports millions of queues)
-* strong durability guarantees: messages are guaranteed to have been saved to
-  disk by the time the sender gets a message receipt
+* queued messages need not fit in memory
+* strong durability guarantees: messages can be guaranteed to have been saved
+  to disk (and fsync'ed) by the time the sender gets a message receipt
 * message priorities
 * per-subscription prefetch limit for queue messages
 * error handling and ACK timeout: if a subscriber doesn't ACK a message
@@ -19,9 +20,11 @@ suitable for implementing task queues and communication between subsystems:
 * simple extensions within the STOMP protocol to report the number of messages
   in a queue and the number of subscribers to a queue or topic
 
-ocamlmq is written in OCaml, in less than 1200 lines of code.  It is easy to
-extend and fairly efficient.  The server is abstracted over a storage backend;
-currently only PostgreSQL's is implemented (< 150 lines of code).
+ocamlmq is written in OCaml, in ~1500 lines of code.  It is easy to extend and
+fairly efficient.  The server is abstracted over a storage backend; there are
+currently two backends:
+* PostgreSQL's (150 LoC)
+* sqlite with in-mem caching (350 LoC)
 
 Scalability
 ===========
@@ -53,11 +56,8 @@ some limitations which preclude its use in other domains:
 * there is no flow control for topic messages (in the intended use case, topic
   messages are assumed to be relatively small and processed fast)
 * messages are limited to 16 MB on 32-bit platforms
-* the PostgreSQL storage backend can only persist a few thousand
-  messages per second (note that ocamlmq allows >50K/s persistent message
-  bursts in async mode)
 * ocamlmq does not support very high message rates (ocamlmq delivers only
-  ~40K messages/second on a 3GHz AMD64 box)
+  ~60K messages/second on a 3GHz AMD64 box)
 
 If you need complex routing rules, scalability to many thousand simultaneous
 connections or other _enterprise_ messaging features, you'll be better served
@@ -71,75 +71,78 @@ Building
 You'll need a working OCaml environment plus the following libraries:
 * Lwt
 * extlib
-* PGOCaml
+* ocaml-sqlite3
+* csv
+* estring
 
 Additionally, ocamlmq requires PostgreSQL both at compile- and run-time.
 
-If you have omake, just do
+If you have omake, Just do
 
   $ omake
 
-Otherwise, run
+otherwise, run
 
   $ sh build.sh
 
-If the compilation fails with the following error
+Installing
+==========
 
-    File "./mq_schema.ml", line 3, characters 21-327 (end at line 11, character 3):
-    Camlp4: Uncaught exception: Unix.Unix_error (20 | CstTag21, "connect", "")
-
-you will have to provide some information using env. variables so that PGOCaml
-can connect to the PostgreSQL server (PGOCaml does this to check statically
-that all the SQL statements are valid), e.g.:
-
-  PGHOST=localhost PGUSER=myself PGPASSWORD=myself omake --verbose
-
-  or
-
-  PGHOST=localhost PGUSER=myself PGPASSWORD=myself sh build.sh
-
-This is the full list of options recognized by PGOcaml:
-
-  PGHOST
-  PGPORT
-  PGUSER
-  PGPASSWORD
-  PGDATABASE
-  UNIX_DOMAIN_SOCKET_DIR
-
-A temporary table will be created in the database while ocamlmq is compiled;
-no permanent changes will be made.
+The ocamlmq executable is self-contained and can be copied to any directory in
+your PATH if desired.
 
 Running
 =======
 
 ocamlmq's configuration is given via the command line:
 
-  $ ./ocamlmq -help
-  Usage: ocamlmq [options]
-    -dbhost HOST         Database server host.
-    -dbport HOST         Database server port.
-    -dbdatabase DATABASE Database name.
-    -dbsockdir DIR       Database UNIX domain socket dir.
-    -dbuser USER         Database user.
-    -dbpassword PASSWORD Database password.
-    -dbmaxconns NUM      Maximum size of DB connection pool.
-    -port PORT           Port to listen at (default: 61613).
-    -login LOGIN         Login expected in CONNECT.
-    -passcode PASSCODE   Passcode expected in CONNECT.
-    -initdb              Initialize the database (create required tables).
-    -debug               Write debug info to stderr.
-    -help                Display this list of options
-    --help               Display this list of options
+Usage: ocamlmq [options] [sqlite3 database (default: ocamlmq.db)]
+  -port PORT         Port to listen at (default: 61613)
+  -login LOGIN       Login expected in CONNECT
+  -passcode PASSCODE Passcode expected in CONNECT
+  -maxmsgs N         Keep at most N msgs in mem before hard flush (default: 100000)
+  -flush-period DT   Hard flush period in seconds (default: 1.0)
+  -binlog FILE       Use FILE as the binlog for msgs in mem (default: none)
+  -sync-binlog       fsync the binlog on each write (default: no)
+  -debug             Write debug info to stderr
+  -help              Display this list of options
+  --help             Display this list of options
 
-ocamlmq can create the required tables (currently, only one, named
-"ocamlmq_msgs") in the PostgreSQL table indicated with -dbdatabase (defaulting
-to one with the same name as the user) with the -initdb option, so you can try
-it with
+ocamlmq stores the messages in memory (and optionally in the binlog) and
+flushes to the permanent store (with full fsync) when either:
+* more than [maxmsgs] messages have been received since the last flush or
+* it's been [flush-period] seconds since the last flush
 
-  $ ./ocamlmq -dbdatabase mydatabase -initdb
+With the -binlog option, the messages kept in mem will also be written to a
+binary log before they are flushed (and fsync'ed) to the permanent store.
+This way, in-mem (not yet flushed) messages can be recovered if ocamlmq were
+killed or crashed.  You can moreover ensure that the binlog is fsync'ed after
+each write with -sync-binlog. This brings you the strongest durability
+guarantees, for every single message is fsync'ed before the broker
+acknowledges its reception.
 
-which will listen on port 61613 by default. 
+Performance
+===========
+
+Here follow some figures, taken on an oldish dual core AMD Athlon 64 X2 with a
+7200 RPM SATA disk.
+
+Queueing (synchronously, with receipt)
+
+ maxmsgs        throughput       throughput (-binlog)
+ ----------------------------------------------------
+   1000         >11000 msg/s      >9000 msg/s
+   5000         >12000 msg/s      >9000 msg/s
+ "infty"        >17000 msg/s     >14000 msg/s
+
+ If the binlog is enabled and -sync-binlog in use, the maximum throughput is
+ around 4000 msg/s.
+
+Delivering:
+
+Topic messages:             >40000 msg/s.
+Queue messages in memory:   >12000 msg/s
+Queue messages on disk:      >2000 msg/s
 
 STOMP protocol specifics 
 ========================
