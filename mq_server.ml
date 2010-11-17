@@ -78,6 +78,7 @@ type broker = {
   mutable b_async_usedmem : int;
   b_login : string option;
   b_passcode : string option;
+  b_max_prefetch : int;
 }
 
 DEFINE DEBUG(what_to_print) = if broker.b_debug then what_to_print
@@ -319,12 +320,14 @@ let cmd_subscribe broker conn frame =
         end
       | Queue name -> begin
           DEBUG(show "Conn %d subscribed to queue %S." conn.conn_id name);
+          let max_prefetch = broker.b_max_prefetch in
           let subscription =
             {
               qs_prefetch =
                 (try
-                   int_of_string (STOMP.get_header frame "prefetch")
-                 with _ -> -1);
+                   let n = int_of_string (STOMP.get_header frame "prefetch") in
+                     if n <= 0 then max_prefetch else min n max_prefetch
+                 with _ -> max_prefetch);
               qs_pending_acks = 0;
             }
           in H.replace conn.conn_queues name subscription;
@@ -547,7 +550,7 @@ and do_establish_connection broker addr ich och =
 let make_broker
       ?(frame_eol = true) ?(force_send_async = false)
       ?(send_async_max_mem = 32 * 1024 * 1024)
-      ?login ?passcode
+      ?(max_prefetch=10) ?login ?passcode
       msg_store address =
   let sock = Lwt_unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
   Lwt_unix.setsockopt sock Unix.SO_REUSEADDR true;
@@ -567,6 +570,7 @@ let make_broker
     b_debug = false;
     b_login = login;
     b_passcode = passcode;
+    b_max_prefetch = max_prefetch;
   }
 
 let server_loop ?(debug = false) broker =

@@ -14,6 +14,7 @@ let max_in_mem = ref 100000
 let flush_period = ref 1.
 let binlog = ref ""
 let sync_binlog = ref false
+let max_prefetch = ref 100
 
 let params =
   Arg.align
@@ -21,6 +22,8 @@ let params =
       "-port", Arg.Set_int port, "PORT Port to listen at (default: 61613)";
       "-login", set_some_string login, "LOGIN Login expected in CONNECT";
       "-passcode", set_some_string passcode, "PASSCODE Passcode expected in CONNECT";
+      "-max-prefetch", Arg.Set_int max_prefetch,
+        "N Maximum allowed prefetch limit (default: 100)";
       "-maxmsgs", Arg.Set_int max_in_mem,
         "N Keep at most N msgs in mem before hard flush (default: 100000)";
       "-flush-period", Arg.Set_float flush_period,
@@ -62,7 +65,7 @@ let () =
         eprintf "Initializing database... %!";
         Mq_sqlite_persistence.initialize msg_store >>
         let () = eprintf "DONE\n%!" in
-        lwt broker = SERVER.make_broker
+        lwt broker = SERVER.make_broker ~max_prefetch:!max_prefetch
                        ?login:!login ?passcode:!passcode msg_store addr
         in SERVER.server_loop ~debug:!debug broker
     end

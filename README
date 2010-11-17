@@ -100,6 +100,7 @@ Usage: ocamlmq [options] [sqlite3 database (default: ocamlmq.db)]
   -port PORT         Port to listen at (default: 61613)
   -login LOGIN       Login expected in CONNECT
   -passcode PASSCODE Passcode expected in CONNECT
+  -max-prefetch N    Maximum allowed prefetch limit (default: 100)
   -maxmsgs N         Keep at most N msgs in mem before hard flush (default: 100000)
   -flush-period DT   Hard flush period in seconds (default: 1.0)
   -binlog FILE       Use FILE as the binlog for msgs in mem (default: none)
