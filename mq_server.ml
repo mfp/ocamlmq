@@ -186,7 +186,8 @@ let find_recipient broker name =
 let have_recipient broker name = Option.is_some (find_recipient broker name)
 
 let rec send_to_recipient ~kind broker listeners conn subs queue msg =
-  DEBUG(show "Sending %S to conn %d." msg.msg_id conn.conn_id);
+  DEBUG(show "Sending %S(%S) to conn %d." msg.msg_id
+          (string_of_destination msg.msg_destination) conn.conn_id);
   let sleep, wakeup = Lwt.task () in
   let msg_id = msg.msg_id in
     subs.qs_pending_acks <- subs.qs_pending_acks + 1;
@@ -220,7 +221,8 @@ let rec send_to_recipient ~kind broker listeners conn subs queue msg =
       return ()
     end >>
     begin
-      DEBUG(show "Conn %d ACKed %S." conn.conn_id msg_id);
+      DEBUG(show "Conn %d ACKed %S(%S)." conn.conn_id msg_id
+              (string_of_destination msg.msg_destination));
       P.ack_msg broker.b_msg_store msg_id >>
       (* try to send older messages for the subscription whose message
        * we just ACKed *)
@@ -234,6 +236,7 @@ and send_saved_messages broker queue =
       None -> return ()
     | Some msg ->
         let msg_id = msg.msg_id in
+        let destination = msg.msg_destination in
         match find_recipient broker queue with
             None -> P.unack_msg broker.b_msg_store msg_id >>
                     (* we try to send again because one might have become
@@ -241,14 +244,15 @@ and send_saved_messages broker queue =
                     send_saved_messages broker queue
           | Some (listeners, (conn, subs)) ->
               ignore_result
-                ~exn_handler:(handle_send_msg_exn broker conn ~queue ~msg_id)
+                ~exn_handler:(handle_send_msg_exn broker conn ~queue ~destination ~msg_id)
                 (send_to_recipient ~kind:Ack_pending broker listeners conn subs queue)
                 msg;
               return ()
 
-and handle_send_msg_exn broker ~queue conn ~msg_id = function
+and handle_send_msg_exn broker ~queue conn ~destination ~msg_id = function
   | Lwt_unix.Timeout | Lwt.Canceled ->
-      DEBUG(show "Timeout/Canceled on message %S." msg_id);
+      DEBUG(show "Timeout/Canceled on message %S(%S)." msg_id
+              (string_of_destination destination));
       enqueue_after_timeout broker ~queue ~msg_id
   | _ -> terminate_connection broker conn >>
          enqueue_after_timeout broker ~queue ~msg_id
@@ -261,28 +265,33 @@ and enqueue_after_timeout broker ~queue ~msg_id =
       None -> return ()
     | Some msg ->
         let msg_id = msg.msg_id in
+        let destination = msg.msg_destination in
         match find_recipient broker queue with
           | None -> begin (* move to main table *)
-              DEBUG(show "No recipient for unACKed message %S, saving." msg_id);
+              DEBUG(show "No recipient for unACKed message %S(%S), saving."
+                      msg_id (string_of_destination msg.msg_destination));
               P.unack_msg broker.b_msg_store msg_id >>
               send_saved_messages broker queue
             end
           | Some (listeners, (conn, subs)) ->
-              DEBUG(show "Found a recipient for unACKed message %S." msg_id);
+              DEBUG(show "Found a recipient for unACKed message %S(%S)."
+                      msg_id (string_of_destination msg.msg_destination));
               try_lwt
                 send_to_recipient ~kind:Ack_pending broker listeners conn subs queue msg
               with e ->
-                DEBUG(show "Trying to enqueue unACKed message %S again." msg_id);
-                handle_send_msg_exn broker ~queue conn ~msg_id e
+                DEBUG(show "Trying to enqueue unACKed message %S(%S) again."
+                        msg_id (string_of_destination msg.msg_destination));
+                handle_send_msg_exn broker ~queue conn ~destination ~msg_id e
 
 let rec send_to_queue broker queue msg =
   match find_recipient broker queue with
       None -> return ()
     | Some (listeners, (conn, subs)) ->
         let msg_id = msg.msg_id in
+        let destination = msg.msg_destination in
           try_lwt
             send_to_recipient ~kind:Saved broker listeners conn subs queue msg
-          with e -> handle_send_msg_exn broker conn ~queue ~msg_id e
+          with e -> handle_send_msg_exn broker conn ~queue ~destination ~msg_id e
 
 let new_msg_id =
   let cnt = ref 0 in fun () ->
