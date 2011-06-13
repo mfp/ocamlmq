@@ -47,14 +47,15 @@ let write_stomp_frame ~eol och frame =
     Buffer.add_string b (string_of_int (String.length frame.fr_body));
     Buffer.add_char b '\n';
     Buffer.add_char b '\n';
-    Lwt_io.atomic
-      (fun och ->
-         Lwt_io.write och (Buffer.contents b) >>
-         Lwt_io.write och frame.fr_body >>
-         (if eol then Lwt_io.write och "\000\n"
-         else Lwt_io.write och "\000") >>
-         Lwt_io.flush och)
-      och
+    let headers = Buffer.contents b in
+      Lwt_io.atomic
+        (fun och ->
+           Lwt_io.write och headers >>
+           Lwt_io.write och frame.fr_body >>
+           (if eol then Lwt_io.write och "\000\n"
+           else Lwt_io.write och "\000") >>
+           Lwt_io.flush och)
+        och
 
 let handle_receipt ?(extra_headers=[]) ~eol och frame =
   try
