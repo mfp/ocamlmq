@@ -3,6 +3,8 @@ open Lwt
 open Printf
 open Mq_types
 
+module Option  = BatOption
+
 module Sqlexpr = Sqlexpr_sqlite.Make(Sqlexpr_concurrency.Id)
 open Sqlexpr
 
@@ -16,7 +18,7 @@ module MSET = Set.Make(struct
 module SSET = Set.Make(String)
 
 type t = {
-  db : Sqlexpr_sqlite.db;
+  db : Sqlexpr.db;
   in_mem : (string, MSET.t * SSET.t) Hashtbl.t;
   in_mem_msgs : (string, message) Hashtbl.t;
   mutable ack_pending : SSET.t;
@@ -116,7 +118,7 @@ let unack db msg_id =
 let check_sqlite_version_ok db =
   let v = select_one db sqlc"SELECT @s{sqlite_version()}" in
   let to_num s = Scanf.sscanf s "%d" (fun n -> n) in
-  let ns = List.map to_num (ExtString.String.nsplit v ".") in
+  let ns = List.map to_num (BatString.nsplit v ".") in
     if ns < [ 3; 6; 8 ] then
       failwith (sprintf "Need sqlite3 >= 3.6.8 (found: %s)" v)
 
@@ -124,7 +126,7 @@ let make ?(max_msgs_in_mem = max_int) ?(flush_period = 1.0)
          ?binlog ?(sync_binlog = false) file =
   let wait_flush, awaken_flush = Lwt.wait () in
   let t =
-    { db = Sqlexpr_sqlite.open_db file; in_mem = Hashtbl.create 13;
+    { db = Sqlexpr.open_db file; in_mem = Hashtbl.create 13;
       in_mem_msgs = Hashtbl.create 13; ack_pending = SSET.empty;
       flush_alarm = awaken_flush;
       max_msgs_in_mem = max_msgs_in_mem;
@@ -186,6 +188,10 @@ let initialize t =
     sqlinit"CREATE TABLE mem.pending_acks(msg_id VARCHAR(255) NOT NULL PRIMARY KEY)";
   execute t.db
     sqlinit"CREATE TABLE mem.acked_msgs(msg_id VARCHAR(255) NOT NULL PRIMARY KEY)";
+  execute t.db
+    sqlinit"PRAGMA journal_mode=WAL;";
+  (* execute t.db *)
+    (* sqlinit"PRAGMA synchronous=NORMAL;"; *)
   return ()
 
 let do_save_msg ?(can_flush = true) t sent msg =

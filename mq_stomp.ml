@@ -2,7 +2,8 @@
 open Mq_types
 open Printf
 open Lwt
-open ExtString
+
+module String = BatString
 
 type stomp_frame = {
   fr_command : string;

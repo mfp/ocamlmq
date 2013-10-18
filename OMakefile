@@ -1,11 +1,12 @@
 
 NATIVE_ENABLED = true
 BYTE_ENABLED = true
-OCAMLOPTFLAGS = -S -inline 100
+OCAMLOPTFLAGS = -inline 100
 USE_OCAMLFIND = true
 
 .SUBDIRS: ocaml-sqlexpr
 
+OCAMLFLAGS = -thread
 OCAMLCFLAGS += -g -annot
 OCAMLFINDFLAGS += -syntax camlp4o
 OCAMLINCLUDES += ocaml-sqlexpr
@@ -17,11 +18,12 @@ OCAMLPACKS[] =
     lwt.unix
     lwt.syntax
     estring
-    extlib
+    batteries
     unix
     str
     sqlite3
     camlp4.macro
+    threads
 
 OBJECTS[] =
     binlog

@@ -59,7 +59,7 @@ let () =
           ~flush_period:!flush_period
           ?binlog:(match !binlog with "" -> None | s -> Some s)
           ~sync_binlog:!sync_binlog
-          (Option.default "ocamlmq.db" !db)
+          (BatOption.default "ocamlmq.db" !db)
       in
         if !debug then eprintf "Connected to database.\n%!";
         eprintf "Initializing database... %!";

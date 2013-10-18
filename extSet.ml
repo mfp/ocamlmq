@@ -1,5 +1,5 @@
 (* Copyright (c) 2010 Mauricio Fernández <mfp@acm.org> *)
-open ExtArray
+module Array = BatArray
 
 module type S =
 sig

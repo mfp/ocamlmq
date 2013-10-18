@@ -1,7 +1,9 @@
 (* Copyright (c) 2010 Mauricio Fernández <mfp@acm.org> *)
 open Printf
 open Lwt
-open ExtString
+
+module String = BatString
+module Option = BatOption
 
 module type PERSISTENCE =
 sig
