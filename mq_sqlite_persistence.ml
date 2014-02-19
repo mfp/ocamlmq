@@ -28,6 +28,7 @@ type t = {
   binlog_file : string option;
   mutable binlog : Binlog.t option;
   sync_binlog : bool;
+  sync : bool;
 }
 
 let count_unmaterialized_pending_acks db =
@@ -115,15 +116,21 @@ let unack db msg_id =
       sqlc"UPDATE ocamlmq_msgs SET ack_pending = 0 WHERE msg_id = %s"
       msg_id
 
-let check_sqlite_version_ok db =
+let get_sqlite_version db =
   let v = select_one db sqlc"SELECT @s{sqlite_version()}" in
   let to_num s = Scanf.sscanf s "%d" (fun n -> n) in
-  let ns = List.map to_num (BatString.nsplit v ".") in
-    if ns < [ 3; 6; 8 ] then
-      failwith (sprintf "Need sqlite3 >= 3.6.8 (found: %s)" v)
+    List.map to_num (BatString.nsplit v ".")
 
-let make ?(max_msgs_in_mem = max_int) ?(flush_period = 1.0)
-         ?binlog ?(sync_binlog = false) file =
+let check_sqlite_version_ok db =
+  let version = get_sqlite_version db in
+    if version < [ 3; 6; 8 ] then
+      failwith (sprintf "Need sqlite3 >= 3.6.8 (found: %s)"
+                  (String.concat "." (List.map string_of_int version)))
+
+let make
+      ?(max_msgs_in_mem = max_int)
+      ?(flush_period = 1.0) ?(sync = true)
+      ?binlog ?(sync_binlog = false) file =
   let wait_flush, awaken_flush = Lwt.wait () in
   let t =
     { db = Sqlexpr.open_db file; in_mem = Hashtbl.create 13;
@@ -133,6 +140,7 @@ let make ?(max_msgs_in_mem = max_int) ?(flush_period = 1.0)
       unacks = SSET.empty;
       binlog_file = binlog; binlog = None;
       sync_binlog = sync_binlog;
+      sync;
     } in
   let flush_period = max flush_period 0.005 in
   let rec loop_flush wait_flush =
@@ -190,8 +198,7 @@ let initialize t =
     sqlinit"CREATE TABLE mem.acked_msgs(msg_id VARCHAR(255) NOT NULL PRIMARY KEY)";
   execute t.db
     sqlinit"PRAGMA journal_mode=WAL;";
-  (* execute t.db *)
-    (* sqlinit"PRAGMA synchronous=NORMAL;"; *)
+  if not t.sync then execute t.db sqlinit"PRAGMA synchronous=NORMAL;";
   return ()
 
 let do_save_msg ?(can_flush = true) t sent msg =

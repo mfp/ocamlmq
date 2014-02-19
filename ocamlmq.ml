@@ -15,6 +15,7 @@ let flush_period = ref 1.
 let binlog = ref ""
 let sync_binlog = ref false
 let max_prefetch = ref 100
+let sync = ref true
 
 let params =
   Arg.align
@@ -32,6 +33,7 @@ let params =
         "FILE Use FILE as the binlog for msgs in mem (default: none)";
       "-sync-binlog", Arg.Set sync_binlog,
         " fsync the binlog on each write (default: no)";
+      "-nosync", Arg.Clear sync, " Don't fsync after each flush (default: do it)";
       "-debug", Arg.Set debug, " Write debug info to stderr";
     ]
 
@@ -58,6 +60,7 @@ let () =
           ~max_msgs_in_mem:!max_in_mem
           ~flush_period:!flush_period
           ?binlog:(match !binlog with "" -> None | s -> Some s)
+          ~sync:!sync
           ~sync_binlog:!sync_binlog
           (BatOption.default "ocamlmq.db" !db)
       in
