@@ -1,22 +1,23 @@
-(* Copyright (c) 2010 Mauricio Fernández <mfp@acm.org> *)
+(* Copyright (c) 2010-2014 Mauricio Fernández <mfp@acm.org> *)
+
 open Printf
 open Lwt
 
 let set_some_string r = Arg.String (fun s -> r := Some s)
 let set_some_int r = Arg.Int (fun n -> r := Some n)
 
-let port = ref 61613
-let debug = ref false
-let login = ref None
-let passcode = ref None
-let db = ref None
-let max_in_mem = ref 100000
+let port         = ref 61613
+let debug        = ref false
+let login        = ref None
+let passcode     = ref None
+let db           = ref None
+let max_in_mem   = ref 100000
 let flush_period = ref 1.
-let binlog = ref ""
-let sync_binlog = ref false
+let binlog       = ref ""
+let sync_binlog  = ref false
 let max_prefetch = ref 100
-let sync = ref true
-let unsafe_db = ref false
+let sync         = ref true
+let unsafe_db    = ref false
 
 let params =
   Arg.align
@@ -74,5 +75,3 @@ let () =
                        ?login:!login ?passcode:!passcode msg_store addr
         in SERVER.server_loop ~debug:!debug broker
     end
-
-
