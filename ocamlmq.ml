@@ -16,6 +16,7 @@ let binlog = ref ""
 let sync_binlog = ref false
 let max_prefetch = ref 100
 let sync = ref true
+let unsafe_db = ref false
 
 let params =
   Arg.align
@@ -34,6 +35,7 @@ let params =
       "-sync-binlog", Arg.Set sync_binlog,
         " fsync the binlog on each write (default: no)";
       "-nosync", Arg.Clear sync, " Don't fsync after each flush (default: do it)";
+      "-unsafe", Arg.Set unsafe_db, " Unsafe DB mode: faster, but risk corruption on system crash";
       "-debug", Arg.Set debug, " Write debug info to stderr";
     ]
 
@@ -60,7 +62,7 @@ let () =
           ~max_msgs_in_mem:!max_in_mem
           ~flush_period:!flush_period
           ?binlog:(match !binlog with "" -> None | s -> Some s)
-          ~sync:!sync
+          ~sync:!sync ~unsafe_db:!unsafe_db
           ~sync_binlog:!sync_binlog
           (BatOption.default "ocamlmq.db" !db)
       in

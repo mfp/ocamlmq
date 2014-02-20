@@ -29,6 +29,7 @@ type t = {
   mutable binlog : Binlog.t option;
   sync_binlog : bool;
   sync : bool;
+  unsafe_db : bool;
 }
 
 let count_unmaterialized_pending_acks db =
@@ -129,7 +130,7 @@ let check_sqlite_version_ok db =
 
 let make
       ?(max_msgs_in_mem = max_int)
-      ?(flush_period = 1.0) ?(sync = true)
+      ?(flush_period = 1.0) ?(sync = true) ?(unsafe_db = false)
       ?binlog ?(sync_binlog = false) file =
   let wait_flush, awaken_flush = Lwt.wait () in
   let t =
@@ -140,7 +141,7 @@ let make
       unacks = SSET.empty;
       binlog_file = binlog; binlog = None;
       sync_binlog = sync_binlog;
-      sync;
+      sync; unsafe_db;
     } in
   let flush_period = max flush_period 0.005 in
   let rec loop_flush wait_flush =
@@ -199,6 +200,7 @@ let initialize t =
   execute t.db
     sqlinit"PRAGMA journal_mode=WAL;";
   if not t.sync then execute t.db sqlinit"PRAGMA synchronous=NORMAL;";
+  if t.unsafe_db then execute t.db sqlinit"PRAGMA synchronous=OFF;";
   return ()
 
 let do_save_msg ?(can_flush = true) t sent msg =
