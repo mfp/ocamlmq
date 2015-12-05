@@ -83,7 +83,7 @@ let copy src dst =
     (fun ich ->
        Lwt_io.with_file
          ~flags:[Unix.O_SYNC; Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC]
-         ~buffer_size:(1024 * 1024)
+         ~buffer:(Lwt_bytes.create (1024 * 1024))
          ~mode:Lwt_io.output dst
          (fun och ->
             let h = Hashtbl.create 13 in
