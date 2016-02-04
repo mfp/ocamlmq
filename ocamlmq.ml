@@ -57,6 +57,9 @@ let () =
               exit 1)
     usage_message;
   let addr = Unix.ADDR_INET (Unix.inet_addr_any, !port) in
+
+    ignore (Unix.umask 0o007 : int);
+
     Lwt_unix.run begin
       let msg_store =
         Mq_sqlite_persistence.make
